@@ -17,7 +17,7 @@ sudo apt-get install libsdl2-dev pkg-config
 ## Compilar
 
 ```bash
-make              # compila las 3 pruebas de la Semana 1
+make              # compila las 3 pruebas 
 make test_physics # solo la prueba de física + integrador (Persona A)
 make test_renderer # solo la prueba de ventana SDL (Persona B)
 make test_init    # solo la prueba de generación de galaxia (Persona C)
