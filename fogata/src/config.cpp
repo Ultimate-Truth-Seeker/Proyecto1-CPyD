@@ -44,7 +44,7 @@ void configPrintUsage(const char* programName) {
         "\n"
         "Uso: %s [opciones]\n"
         "\n"
-        "  -n  <entero>   Cantidad de particulas de fuego  (%d..%d, por defecto 4000)\n"
+        "  -n  <entero>   Cantidad de particulas de fuego  (%d..%d, por defecto 3000)\n"
         "  -w  <entero>   Ancho de la ventana en pixeles   (min %d, por defecto 1280)\n"
         "  -h  <entero>   Alto de la ventana en pixeles    (min %d, por defecto 720)\n"
         "  -i  <decimal>  Intensidad del brillo            (%.2f..%.2f, por defecto 1.00)\n"

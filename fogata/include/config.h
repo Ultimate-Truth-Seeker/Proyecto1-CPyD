@@ -23,7 +23,7 @@ constexpr float    kMaxWind       = 3.00f;
 struct Config {
     int      width       = 1280;   // ancho del canvas en pixeles
     int      height      = 720;    // alto del canvas en pixeles
-    int      nParticles  = 4000;   // N: cantidad de particulas de fuego
+    int      nParticles  = 3000;   // N: cantidad de particulas de fuego
     float    intensity   = 1.0f;   // multiplicador de brillo de la llama
     float    wind        = 0.35f;  // fuerza del viento lateral (rafagas)
     uint32_t seed        = 0;      // semilla PRNG; 0 = derivada del reloj

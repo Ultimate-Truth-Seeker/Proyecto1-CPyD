@@ -10,6 +10,8 @@ luego se mapea a una paleta de cuerpo negro (negro -> rojo -> naranja -> amarill
 Esta es la **version secuencial** del Proyecto #1 de Computacion Paralela y
 Distribuida. La version paralela con OpenMP se construye a partir de esta.
 
+![Captura del screensaver](docs/captura.png)
+
 ## Dependencias
 
 - Compilador C++17 (`g++`)
@@ -39,7 +41,7 @@ Ningun valor esta fijo en el codigo: todo se lee de la linea de comandos.
 
 | Opcion | Descripcion | Rango | Por defecto |
 |---|---|---|---|
-| `-n <entero>` | Cantidad de particulas (N) | 1 .. 2000000 | 4000 |
+| `-n <entero>` | Cantidad de particulas (N) | 1 .. 2000000 | 3000 |
 | `-w <entero>` | Ancho de la ventana | 640 .. 7680 | 1280 |
 | `-h <entero>` | Alto de la ventana | 480 .. 4320 | 720 |
 | `-i <decimal>` | Intensidad del brillo | 0.10 .. 5.00 | 1.00 |
@@ -62,6 +64,24 @@ Ejemplos:
 > topado al refresco del monitor (normalmente 60).
 
 Salir: `ESC` o `Q`.
+
+## Rendimiento medido (version secuencial)
+
+Promedio de 7 mediciones de 1 segundo por corrida, con `--no-vsync` y semilla
+fija, sobre un equipo con otras aplicaciones abiertas. Los FPS tambien se
+imprimen por consola una vez por segundo, ademas de mostrarse en pantalla.
+
+| N | Resolucion | FPS promedio |
+|---|---|---|
+| 1 | 1280x720 | 80.9 |
+| 3000 (por defecto) | 1280x720 | 41.4 |
+| 3000 | 640x480 | 99.3 |
+| 8000 | 1280x720 | 27.8 |
+| 16000 | 1280x720 | 20.5 |
+
+El coste crece de forma practicamente lineal con N, que es justo lo que se
+busca de cara a la version paralela: el bucle de acumulacion de particulas es
+el que domina el tiempo de frame y es el candidato natural a paralelizar.
 
 ## Programacion defensiva
 
