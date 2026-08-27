@@ -4,13 +4,18 @@
 #      make clean    -> borra los objetos y el binario
 
 CXX      ?= g++
-CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Iinclude
+# -O3 y -ffast-math importan aqui: el nucleo del render es un bucle de
+# sumas en coma flotante que el compilador puede vectorizar.
+CXXFLAGS := -std=c++17 -O3 -ffast-math -Wall -Wextra -Iinclude
 LDLIBS   := -lm
 
 # SDL2: preferimos pkg-config; si no esta disponible caemos al enlace manual
 # que funciona tanto en MSYS2/MinGW como en Linux.
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell pkg-config --libs   sdl2 2>/dev/null)
+# En Windows pkg-config agrega -mwindows, que oculta la consola; la queremos
+# visible porque el programa tambien reporta los FPS por stdout.
+SDL_LIBS   := $(filter-out -mwindows,$(SDL_LIBS))
 ifeq ($(strip $(SDL_LIBS)),)
   ifeq ($(OS),Windows_NT)
     SDL_LIBS := -lmingw32 -lSDL2main -lSDL2
