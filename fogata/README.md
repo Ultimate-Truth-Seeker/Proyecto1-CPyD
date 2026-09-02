@@ -1,4 +1,4 @@
-# Fogata — Screensaver secuencial
+# Fogata — Screensaver (Secuencial y Paralelo)
 
 Screensaver de una fogata de noche: llamas, chispas y humo simulados con un
 sistema de particulas sobre un cielo estrellado, con las brasas iluminando el
@@ -11,8 +11,9 @@ coma flotante, y solo al final ese campo se comprime a 8 bits pasando por una
 paleta de cuerpo negro (rojo -> naranja -> amarillo -> incandescente) y un
 mapeo de tonos con bloom.
 
-Esta es la **version secuencial** del Proyecto #1 de Computacion Paralela y
-Distribuida. La version paralela con OpenMP se construye a partir de esta.
+Esta es el Proyecto #1 de Computacion Paralela y Distribuida. Incluye dos
+versiones compilables: **secuencial** (pragmas de OpenMP ignorados) y
+**paralela** (pragmas de OpenMP habilitados con `-fopenmp`).
 
 ![Captura del screensaver](docs/captura.png)
 
@@ -35,8 +36,15 @@ pacman -S --needed git make mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2 mingw-w64
 ```bash
 git clone https://github.com/Ultimate-Truth-Seeker/Proyecto1-CPyD.git
 cd Proyecto1-CPyD/fogata
-make
-./build/fogata
+make sequential
+./build-sequential/fogata
+```
+
+Para la version paralela:
+
+```bash
+make parallel
+./build-parallel/fogata
 ```
 
 Todo esto desde la misma terminal MINGW64. El ejecutable necesita `SDL2.dll`,
@@ -49,8 +57,15 @@ terminal MINGW64, y por eso conviene ejecutarlo desde ahi.
 sudo apt-get install build-essential libsdl2-dev pkg-config git
 git clone https://github.com/Ultimate-Truth-Seeker/Proyecto1-CPyD.git
 cd Proyecto1-CPyD/fogata
-make
-./build/fogata
+make sequential
+./build-sequential/fogata
+```
+
+Para la version paralela:
+
+```bash
+make parallel
+./build-parallel/fogata
 ```
 
 ### Otros comandos utiles
@@ -59,13 +74,68 @@ make
 make clean
 ```
 
+Limpia los directorios de compilacion (build-sequential/ y build-parallel/).
+
+```bash
+make sequential
+```
+
+Compila la version secuencial (pragmas de OpenMP ignorados). Genera `build-sequential/fogata`.
+
+```bash
+make parallel
+```
+
+Compila la version paralela con OpenMP (pragmas habilitados). Genera `build-parallel/fogata`.
+
 ```bash
 make run
 ```
 
+Ejecuta la version secuencial compilada. Equivalente a `./build-sequential/fogata`.
+
 ```bash
-./build/fogata --help
+make run-parallel
 ```
+
+Ejecuta la version paralela compilada. Equivalente a `./build-parallel/fogata`.
+
+```bash
+./build-sequential/fogata --help
+```
+
+Muestra la ayuda de parametros.
+
+## Sistema de compilacion (Dual-mode)
+
+El Makefile soporta dos modos de compilacion:
+
+- **Secuencial** (por defecto): Los pragmas de `#pragma omp parallel for` se ignoran
+  durante la compilacion (sin `-fopenmp`). El codigo se ejecuta en un unico hilo.
+  
+- **Paralelo**: Se habilita `-fopenmp` en la compilacion, y los pragmas se reconocen.
+  El codigo se ejecuta en multiples hilos usando OpenMP.
+
+Ambas versiones se compilan en directorios separados:
+- `build-sequential/` para la version secuencial
+- `build-parallel/` para la version paralela
+
+Esto permite comparar facilmente el rendimiento de ambas versiones, manteniendo el
+codigo fuente intacto (sin cambios de logica, solo pragmas).
+
+### Estructura de pragmas
+
+Las funciones paralelizadas usan pragmas simples que se ignoran sin `-fopenmp`:
+
+```cpp
+#pragma omp parallel for schedule(dynamic, 64)
+for (int i = 0; i < size; ++i) {
+    // Trabajo independiente...
+}
+```
+
+En modo secuencial, estos pragmas son comentarios ignorados y el bucle se ejecuta
+normalmente. En modo paralelo, el compilador genera codigo multihilo.
 
 ## Problemas frecuentes
 
@@ -75,6 +145,7 @@ make run
 | `No se encontro SDL2.dll` al ejecutar | Se lanzo el `.exe` desde el Explorador, `cmd` o Git Bash. Ejecutelo desde la terminal MINGW64, o agregue la carpeta `mingw64/bin` de MSYS2 al PATH del sistema. |
 | `Cannot create temporary file in C:\WINDOWS\` al compilar | Se esta usando el `make` de MSYS2 desde Git Bash, que mezcla las rutas de los dos entornos. Compile desde la terminal MINGW64, o use `mingw32-make` con `mingw64/bin` en el PATH. |
 | `make: command not found` | Falta el paquete `make` (`pacman -S make`). |
+| `./build/fogata: No such file or directory` | El Makefile genera `build-sequential/` o `build-parallel/`, no `build/`. Use `./build-sequential/fogata` o `./build-parallel/fogata`. |
 | FPS mas bajos que los de la tabla | Normal con otras aplicaciones pesadas abiertas, o si se quito `-march=native` del Makefile. Baje `-n` para recuperar FPS. |
 | Un binario compilado en otra maquina no arranca | `-march=native` genera codigo para el procesador donde se compilo. Recompile en la maquina donde va a ejecutarlo. |
 

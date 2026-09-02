@@ -1,9 +1,10 @@
-# Arquitectura — Screensaver de fogata (versión secuencial)
+# Arquitectura — Screensaver de fogata (versión secuencial y paralela)
 
-Documento de diseño de la primera entrega del Proyecto #1 de Computación
-Paralela y Distribuida: el screensaver de una fogata nocturna, implementado en
-C++17 con SDL2, **totalmente secuencial**. La versión paralela con OpenMP se
-construye después sobre esta misma base.
+Documento de diseño del Proyecto #1 de Computación Paralela y Distribuida: el
+screensaver de una fogata nocturna, implementado en C++17 con SDL2. Incluye dos
+versiones compilables: **secuencial** (código base) y **paralela** (con pragmas
+de OpenMP). La base del código es idéntica en ambas; solo cambia la presencia
+de directivas de paralelización durante la compilación.
 
 El código vive en la carpeta `fogata/` del repositorio, separado del scaffolding
 previo del simulador de galaxia, que queda intacto.
@@ -290,6 +291,45 @@ y se desbloquea dentro del mismo frame, y si el bloqueo falla el frame se salta
 en lugar de escribir en un puntero inválido. No hay punteros crudos con
 propiedad ni `new` fuera de los contenedores estándar.
 
+### 3.13 Sistema dual-mode: secuencial y paralelo en un mismo código
+
+Para facilitar la comparación de rendimiento, el código soporta compilación
+en dos modos:
+
+**Modo secuencial** (por defecto):
+- Se compila sin `-fopenmp`
+- Los pragmas de `#pragma omp parallel for` son ignorados por el compilador
+- El código se ejecuta en un único hilo
+- Se genera en `build-sequential/`
+
+**Modo paralelo**:
+- Se compila con `-fopenmp`
+- Los pragmas se reconocen y se generan bucles multihilo
+- Se ejecuta en todos los cores disponibles
+- Se genera en `build-parallel/`
+
+El **Makefile** controla qué modo se usa mediante la variable `BUILD_TYPE`:
+```makefile
+make sequential    # Compila versión secuencial
+make parallel      # Compila versión paralela
+```
+
+La ventaja de este enfoque es:
+
+1. **Código únicamente, sin cambios de lógica**: los pragmas son directivas
+   indiferentes para el compilador en modo secuencial. No hay código condicional
+   tipo `#ifdef PARALLEL`.
+
+2. **Medición limpia**: ambos binarios tienen el mismo layout de memoria, las
+   mismas optimizaciones `-O3 -ffast-math -march=native`, solo cambia si se
+   reconocen los pragmas de OpenMP.
+
+3. **Debugging facilitado**: se puede correr la versión secuencial bajo `gdb`
+   o `valgrind` sin introducir hilos.
+
+El precio es reservar un poco más de espacio en disco (dos ejecutables y dos
+directorios de compilación).
+
 ---
 
 ## 4. Flujo de un frame
@@ -341,3 +381,111 @@ patrones de descomposición del curso:
 
 Las mediciones de la tabla del [README](fogata/README.md) sirven de línea base
 para calcular speedup y eficiencia en la segunda entrega.
+
+---
+
+## 6. Pragmas de OpenMP utilizados
+
+### 6.1 FireSystem::update() — `particle.cpp` línea ~107
+
+```cpp
+#pragma omp parallel for schedule(dynamic, 64)
+for (int i = 0; i < static_cast<int>(particles_.size()); ++i) {
+    Particle& p = particles_[i];
+    // Actualización física de cada partícula
+}
+```
+
+**Por qué funciona**: cada partícula es completamente independiente. No hay
+lecturas/escrituras compartidas salvo el PRNG, que será tratado después.
+
+**Estrategia de scheduling**: `dynamic` con chunk size 64. Las partículas no
+tienen carga uniforme (chispas vs humo), así que la distribución estática sería
+desbalanceada. El chunk size de 64 es un compromiso entre overhead de
+sincronización y balance de carga.
+
+### 6.2 Renderer::accumulateParticles() — `renderer.cpp` línea ~287
+
+```cpp
+#pragma omp parallel for schedule(dynamic, 64)
+for (int pi = 0; pi < static_cast<int>(fire.particles().size()); ++pi) {
+    const Particle& p = fire.particles()[pi];
+    // Suma el brillo de cada partícula al campo flotante
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            row[c] += colorR * weight;  // <-- ESCRIBTURA A MEMORIA COMPARTIDA
+        }
+    }
+}
+```
+
+**Conflicto real**: múltiples partículas pueden solaparseel brillo en el mismo
+píxel. Esto es un **data race**. La solución será (en una entrega posterior)
+uno de:
+- Campos privados por hilo y reducción
+- Partición del canvas en bandas
+- Actualización atómica (lenta)
+
+Por ahora, el pragma se documenta como "experimental".
+
+### 6.3 Renderer::composite() — `renderer.cpp` línea ~349
+
+```cpp
+#pragma omp parallel for
+for (int y = 0; y < height_; ++y) {
+    // Composición del campo RGB, fondo, y luz
+    // Cada hilo escribe filas distintas: sin conflictos
+}
+```
+
+**Por qué funciona**: cada fila se escribe por un único hilo, sin solapamiento.
+
+**Detalle**: el acumulador `raw` del bloom se escribe una vez por bloque de
+`kBloomScale` filas. Esto requiere sincronización, que queda cargo del usuario
+(un `#pragma omp barrier` implícito al fin del loop).
+
+### 6.4 Renderer::blurBloom() — `renderer.cpp` líneas ~397 y ~419
+
+Dos pasadas independientes, cada una paralelizable:
+
+```cpp
+// Pasada horizontal
+#pragma omp parallel for
+for (int y = 0; y < bloomHeight_; ++y) { /* sumar deslizante en x */ }
+
+// [Barrera implícita aquí]
+
+// Pasada vertical
+#pragma omp parallel for
+for (int x = 0; x < bloomWidth_; ++x) { /* sumar deslizante en y */ }
+```
+
+**Estructura**: dos bucles independientes paralelizables, cada uno con lectura
+de un arreglo y escritura a otro. Sin conflictos dentro de cada pasada. La
+barrera entre ambas es implícita: el fin del primer pragma y el comienzo del
+segundo.
+
+---
+
+## 5. Preparación para la versión paralela
+
+La arquitectura deja identificados los puntos calientes, que son también los
+patrones de descomposición del curso:
+
+1. **`FireSystem::update`** — descomposición de datos pura. Cada partícula se
+   actualiza sólo a partir de su propio estado; la única dependencia compartida
+   es el PRNG usado en `respawn`, que habrá que resolver con un generador por
+   hilo para no serializar ni introducir una condición de carrera.
+
+2. **`Renderer::accumulateParticles`** — es el bucle más caro y tiene un
+   conflicto real: dos partículas solapadas escriben en el mismo píxel del
+   campo. Es el caso de libro para discutir reducción sobre el campo, campos
+   privados por hilo, o partición del canvas en bandas horizontales.
+
+3. **`Renderer::composite`** — descomposición trivial por filas, sin conflictos,
+   salvo por el acumulador del bloom, que se comparte entre las filas de un
+   mismo bloque: o se reparte por bloques de bloom en lugar de por filas, o cada
+   hilo acumula en su propio bloque.
+
+4. **`Renderer::blurBloom`** — las dos pasadas son independientes por fila y por
+   columna respectivamente; la barrera entre ambas es obligatoria.
