@@ -1,11 +1,15 @@
 # Fogata — Screensaver secuencial
 
-Screensaver de una fogata renderizada con un sistema de particulas: cada llama
-es una particula con temperatura propia que sube por flotabilidad, se enfria y
-es empujada por un campo de turbulencia construido con sumas de senos y cosenos.
-El color no se pinta directamente: se acumula *calor* en un campo escalar y
-luego se mapea a una paleta de cuerpo negro (negro -> rojo -> naranja -> amarillo
--> blanco), que es lo que le da el aspecto de fuego real.
+Screensaver de una fogata de noche: llamas, chispas y humo simulados con un
+sistema de particulas sobre un cielo estrellado, con las brasas iluminando el
+suelo y el circulo de piedras.
+
+Cada particula tiene temperatura propia, sube por flotabilidad, se enfria y es
+empujada por un campo de turbulencia construido con sumas de senos y cosenos.
+El color no se pinta directamente: cada particula *suma* luz a un campo RGB en
+coma flotante, y solo al final ese campo se comprime a 8 bits pasando por una
+paleta de cuerpo negro (rojo -> naranja -> amarillo -> incandescente) y un
+mapeo de tonos con bloom.
 
 Esta es la **version secuencial** del Proyecto #1 de Computacion Paralela y
 Distribuida. La version paralela con OpenMP se construye a partir de esta.
@@ -67,21 +71,29 @@ Salir: `ESC` o `Q`.
 
 ## Rendimiento medido (version secuencial)
 
-Promedio de 7 mediciones de 1 segundo por corrida, con `--no-vsync` y semilla
+Promedio de mediciones de 1 segundo por corrida, con `--no-vsync` y semilla
 fija, sobre un equipo con otras aplicaciones abiertas. Los FPS tambien se
 imprimen por consola una vez por segundo, ademas de mostrarse en pantalla.
 
 | N | Resolucion | FPS promedio |
 |---|---|---|
-| 1 | 1280x720 | 80.9 |
-| 3000 (por defecto) | 1280x720 | 41.4 |
-| 3000 | 640x480 | 99.3 |
-| 8000 | 1280x720 | 27.8 |
-| 16000 | 1280x720 | 20.5 |
+| 1 | 1280x720 | ~70 |
+| 3000 (por defecto) | 1280x720 | 47.4 |
+| 3000 | 640x480 | 108.2 |
+| 6000 | 1280x720 | 34.2 |
+| 12000 | 1280x720 | 18.2 |
 
 El coste crece de forma practicamente lineal con N, que es justo lo que se
 busca de cara a la version paralela: el bucle de acumulacion de particulas es
 el que domina el tiempo de frame y es el candidato natural a paralelizar.
+
+### Nota sobre las banderas de compilacion
+
+El Makefile usa `-O3 -ffast-math -march=native`. `-march=native` mide un ~45%
+mas de FPS porque deja al compilador vectorizar los bucles del render con las
+instrucciones del procesador donde se compila; a cambio, el binario resultante
+solo es portable a maquinas con el mismo juego de instrucciones. Si necesita un
+binario portable, quite esa bandera del Makefile.
 
 ## Programacion defensiva
 

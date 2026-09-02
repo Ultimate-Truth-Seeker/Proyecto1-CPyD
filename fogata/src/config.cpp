@@ -1,4 +1,3 @@
-// config.cpp — Parseo defensivo de la linea de comandos.
 #include "config.h"
 
 #include <cerrno>
@@ -9,7 +8,6 @@
 
 namespace {
 
-// Convierte texto a entero rechazando basura ("12abc", "", " ", overflow).
 bool parseInt(const char* text, long& out) {
     if (text == nullptr || *text == '\0') return false;
     errno = 0;
@@ -20,7 +18,6 @@ bool parseInt(const char* text, long& out) {
     return true;
 }
 
-// Convierte texto a flotante rechazando basura y valores no finitos.
 bool parseFloat(const char* text, float& out) {
     if (text == nullptr || *text == '\0') return false;
     errno = 0;
@@ -31,12 +28,11 @@ bool parseFloat(const char* text, float& out) {
     return true;
 }
 
-// Arma el mensaje "la opcion X necesita un valor" de forma uniforme.
 std::string missingValue(const char* flag) {
     return std::string("la opcion '") + flag + "' necesita un valor.";
 }
 
-}  // namespace
+}
 
 void configPrintUsage(const char* programName) {
     std::fprintf(stderr,
@@ -62,11 +58,10 @@ void configPrintUsage(const char* programName) {
 }
 
 bool configParse(int argc, char** argv, Config& out, std::string& error) {
-    Config cfg;  // arranca con los valores por defecto
+    Config cfg;
 
     for (int i = 1; i < argc; ++i) {
         const char* arg = argv[i];
-        // Devuelve el siguiente argumento como valor, o nullptr si no existe.
         auto nextValue = [&]() -> const char* {
             return (i + 1 < argc) ? argv[++i] : nullptr;
         };
@@ -164,11 +159,9 @@ bool configParse(int argc, char** argv, Config& out, std::string& error) {
         }
     }
 
-    // Semilla 0 significa "no determinista": la derivamos del reloj de alta
-    // resolucion para que cada corrida tenga colores y chispas distintos.
     if (cfg.seed == 0) {
         const auto now = std::chrono::high_resolution_clock::now().time_since_epoch();
-        cfg.seed = static_cast<uint32_t>(now.count()) | 1u;  // xorshift no admite 0
+        cfg.seed = static_cast<uint32_t>(now.count()) | 1u;
     }
 
     out = cfg;

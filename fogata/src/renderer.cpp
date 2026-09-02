@@ -1,13 +1,3 @@
-// renderer.cpp — Render por software: campo de luz flotante -> pixeles.
-//
-// Tuberia de un frame:
-//   1. accumulateParticles() suma el brillo de cada particula al campo RGB
-//   2. accumulateHearth()    suma las brasas y el halo del lecho de la fogata
-//   3. toneMap()             pasa el campo a ARGB de 8 bits y, de paso, atenua
-//                            el campo para que el frame siguiente arrastre
-//                            estelas de humo y chispas
-//   4. drawLogs()            dibuja los lenos en primer plano
-//   5. drawHud()             FPS, N y resolucion sobre la imagen final
 #include "renderer.h"
 
 #include <SDL2/SDL.h>
@@ -19,99 +9,114 @@
 
 namespace {
 
-// --- Ajustes de aspecto ---
-constexpr float kTrailDecay   = 0.50f;  // cuanto sobrevive el frame anterior
-constexpr float kExposure     = 0.95f;  // exposicion antes del mapeo de tonos
-constexpr float kEmberBoost   = 3.20f;  // las chispas brillan mas que las llamas
-constexpr float kFlameBoost   = 0.55f;
-constexpr int   kReferenceN   = 4000;   // N para el que esta calibrado el brillo
-constexpr float kMaxStretch   = 1.85f;  // alargamiento vertical maximo de una llama
-constexpr int   kGammaLutSize = 1024;   // resolucion de la curva gamma precalculada
+constexpr float kTrailDecay    = 0.55f;
+constexpr float kExposure      = 1.05f;
+constexpr float kFlameBoost    = 0.58f;
+constexpr float kEmberBoost    = 3.60f;
+constexpr float kSmokeBoost    = 0.022f;
+constexpr int   kReferenceN    = 3000;
+constexpr float kMaxStretch    = 1.85f;
+constexpr int   kGammaLutSize  = 1024;
 
-// Puntos de control de la paleta de cuerpo negro, de frio a incandescente.
-// Cada fila es {temperatura, R, G, B} en intensidad lineal.
+constexpr int   kBloomScale    = 4;
+constexpr int   kBloomRadius   = 5;
+constexpr float kBloomStrength = 0.34f;
+
+constexpr int   kStarCount     = 520;
+constexpr float kHorizonRatio  = 0.78f;
+constexpr float kVignette      = 0.74f;
+
+constexpr float kSmokeColor[3]     = {0.145f, 0.132f, 0.128f};
+constexpr float kStarColor[3]      = {0.82f, 0.88f, 1.00f};
+constexpr float kFirelightColor[3] = {1.00f, 0.40f, 0.12f};
+constexpr float kBlueCore[3]       = {0.30f, 0.55f, 1.00f};
+
 constexpr float kRamp[][4] = {
-    {0.00f, 0.05f, 0.005f, 0.010f},  // rescoldo casi apagado
-    {0.12f, 0.35f, 0.030f, 0.010f},  // rojo profundo
-    {0.30f, 0.90f, 0.140f, 0.020f},  // rojo naranja
-    {0.50f, 1.00f, 0.380f, 0.050f},  // naranja
-    {0.70f, 1.00f, 0.640f, 0.150f},  // ambar
-    {0.86f, 1.00f, 0.850f, 0.420f},  // amarillo
-    {1.00f, 1.00f, 0.920f, 0.620f},  // amarillo incandescente
+    {0.00f, 0.05f, 0.005f, 0.010f},
+    {0.12f, 0.35f, 0.030f, 0.010f},
+    {0.30f, 0.90f, 0.140f, 0.020f},
+    {0.50f, 1.00f, 0.380f, 0.050f},
+    {0.70f, 1.00f, 0.640f, 0.150f},
+    {0.86f, 1.00f, 0.850f, 0.420f},
+    {1.00f, 1.00f, 0.920f, 0.620f},
 };
 constexpr int kRampSize = static_cast<int>(sizeof(kRamp) / sizeof(kRamp[0]));
 
-// --- Fuente de mapa de bits 5x7 para el HUD ---
-// Evita depender de SDL_ttf: cada glifo son 7 bytes y cada byte una fila,
-// con el bit 4 como columna izquierda.
 const char kCharset[] = " .,:-/=%0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const uint8_t kGlyphs[][7] = {
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00},  // espacio
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x04},  // punto
-    {0x00,0x00,0x00,0x00,0x00,0x04,0x08},  // coma
-    {0x00,0x00,0x04,0x00,0x04,0x00,0x00},  // dos puntos
-    {0x00,0x00,0x00,0x0E,0x00,0x00,0x00},  // guion
-    {0x01,0x01,0x02,0x04,0x08,0x10,0x10},  // barra
-    {0x00,0x00,0x1F,0x00,0x1F,0x00,0x00},  // igual
-    {0x11,0x12,0x02,0x04,0x08,0x09,0x11},  // porcentaje
-    {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E},  // 0
-    {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E},  // 1
-    {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F},  // 2
-    {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E},  // 3
-    {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02},  // 4
-    {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E},  // 5
-    {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E},  // 6
-    {0x1F,0x01,0x02,0x04,0x08,0x08,0x08},  // 7
-    {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E},  // 8
-    {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C},  // 9
-    {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11},  // A
-    {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E},  // B
-    {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E},  // C
-    {0x1C,0x12,0x11,0x11,0x11,0x12,0x1C},  // D
-    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F},  // E
-    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10},  // F
-    {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F},  // G
-    {0x11,0x11,0x11,0x1F,0x11,0x11,0x11},  // H
-    {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E},  // I
-    {0x07,0x02,0x02,0x02,0x02,0x12,0x0C},  // J
-    {0x11,0x12,0x14,0x18,0x14,0x12,0x11},  // K
-    {0x10,0x10,0x10,0x10,0x10,0x10,0x1F},  // L
-    {0x11,0x1B,0x15,0x15,0x11,0x11,0x11},  // M
-    {0x11,0x11,0x19,0x15,0x13,0x11,0x11},  // N
-    {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E},  // O
-    {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10},  // P
-    {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D},  // Q
-    {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11},  // R
-    {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E},  // S
-    {0x1F,0x04,0x04,0x04,0x04,0x04,0x04},  // T
-    {0x11,0x11,0x11,0x11,0x11,0x11,0x0E},  // U
-    {0x11,0x11,0x11,0x11,0x11,0x0A,0x04},  // V
-    {0x11,0x11,0x11,0x15,0x15,0x1B,0x11},  // W
-    {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11},  // X
-    {0x11,0x11,0x0A,0x04,0x04,0x04,0x04},  // Y
-    {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F},  // Z
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x04},
+    {0x00,0x00,0x00,0x00,0x00,0x04,0x08},
+    {0x00,0x00,0x04,0x00,0x04,0x00,0x00},
+    {0x00,0x00,0x00,0x0E,0x00,0x00,0x00},
+    {0x01,0x01,0x02,0x04,0x08,0x10,0x10},
+    {0x00,0x00,0x1F,0x00,0x1F,0x00,0x00},
+    {0x11,0x12,0x02,0x04,0x08,0x09,0x11},
+    {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E},
+    {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E},
+    {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F},
+    {0x1F,0x02,0x04,0x02,0x01,0x11,0x0E},
+    {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02},
+    {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E},
+    {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E},
+    {0x1F,0x01,0x02,0x04,0x08,0x08,0x08},
+    {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E},
+    {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C},
+    {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11},
+    {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E},
+    {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E},
+    {0x1C,0x12,0x11,0x11,0x11,0x12,0x1C},
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F},
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10},
+    {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F},
+    {0x11,0x11,0x11,0x1F,0x11,0x11,0x11},
+    {0x0E,0x04,0x04,0x04,0x04,0x04,0x0E},
+    {0x07,0x02,0x02,0x02,0x02,0x12,0x0C},
+    {0x11,0x12,0x14,0x18,0x14,0x12,0x11},
+    {0x10,0x10,0x10,0x10,0x10,0x10,0x1F},
+    {0x11,0x1B,0x15,0x15,0x11,0x11,0x11},
+    {0x11,0x11,0x19,0x15,0x13,0x11,0x11},
+    {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E},
+    {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10},
+    {0x0E,0x11,0x11,0x11,0x15,0x12,0x0D},
+    {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11},
+    {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E},
+    {0x1F,0x04,0x04,0x04,0x04,0x04,0x04},
+    {0x11,0x11,0x11,0x11,0x11,0x11,0x0E},
+    {0x11,0x11,0x11,0x11,0x11,0x0A,0x04},
+    {0x11,0x11,0x11,0x15,0x15,0x1B,0x11},
+    {0x11,0x11,0x0A,0x04,0x0A,0x11,0x11},
+    {0x11,0x11,0x0A,0x04,0x04,0x04,0x04},
+    {0x1F,0x01,0x02,0x04,0x08,0x10,0x1F},
 };
 
-// Devuelve el glifo de un caracter, o nullptr si no esta en el juego soportado.
 const uint8_t* glyphFor(char c) {
     if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
     if (c == '\0') return nullptr;
     const char* found = std::strchr(kCharset, c);
-    if (found == nullptr) return nullptr;
-    return kGlyphs[found - kCharset];
+    return (found == nullptr) ? nullptr : kGlyphs[found - kCharset];
 }
 
-// Convierte un flotante a texto con un decimal, sin depender de <sstream>.
 std::string oneDecimal(float value) {
     char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "%.1f", static_cast<double>(value));
     return buffer;
 }
 
+float clamp01(float value) {
+    return (value < 0.0f) ? 0.0f : (value > 1.0f) ? 1.0f : value;
+}
+
+float vignetteAt(int x, int y, int width, int height) {
+    const float nx = static_cast<float>(x) / static_cast<float>(width  - 1) * 2.0f - 1.0f;
+    const float ny = static_cast<float>(y) / static_cast<float>(height - 1) * 2.0f - 1.0f;
+    const float radial = (nx * nx + ny * ny) * 0.5f;
+    return std::max(0.20f, 1.0f - kVignette * radial * radial);
+}
+
 }  // namespace
 
 Renderer::~Renderer() {
-    // Destruccion en orden inverso a la creacion; SDL_Quit lo llama main().
     if (texture_  != nullptr) SDL_DestroyTexture(texture_);
     if (renderer_ != nullptr) SDL_DestroyRenderer(renderer_);
     if (window_   != nullptr) SDL_DestroyWindow(window_);
@@ -120,15 +125,12 @@ Renderer::~Renderer() {
     window_   = nullptr;
 }
 
-bool Renderer::init(const Config& cfg, std::string& error) {
+bool Renderer::init(const Config& cfg, const FireSystem& fire, std::string& error) {
     width_     = cfg.width;
     height_    = cfg.height;
     intensity_ = cfg.intensity;
-
-    // Con muchas particulas cada una debe aportar menos luz, o la pantalla se
-    // satura a blanco. Normalizamos el brillo contra un N de referencia.
-    densidad_ = std::min(3.0f, std::max(0.10f,
-                static_cast<float>(kReferenceN) / static_cast<float>(cfg.nParticles)));
+    density_   = std::min(3.0f, std::max(0.10f,
+                 static_cast<float>(kReferenceN) / static_cast<float>(cfg.nParticles)));
 
     window_ = SDL_CreateWindow("Fogata - screensaver secuencial",
                                SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -153,10 +155,25 @@ bool Renderer::init(const Config& cfg, std::string& error) {
         return false;
     }
 
-    field_.assign(static_cast<size_t>(width_) * height_ * 3, 0.0f);
-    pixels_.assign(static_cast<size_t>(width_) * height_, 0u);
+    const size_t pixelCount = static_cast<size_t>(width_) * height_;
+    field_.assign(pixelCount * 3, 0.0f);
+    background_.assign(pixelCount * 3, 0.0f);
+    firelight_.assign(pixelCount, 0.0f);
 
-    // Precalculo de la paleta: interpolacion lineal entre los puntos de control.
+    bloomWidth_  = (width_  + kBloomScale - 1) / kBloomScale;
+    bloomHeight_ = (height_ + kBloomScale - 1) / kBloomScale;
+    bloom_.assign(static_cast<size_t>(bloomWidth_) * bloomHeight_ * 3, 0.0f);
+    bloomRaw_.assign(bloom_.size(), 0.0f);
+    bloomScratch_.assign(bloom_.size(), 0.0f);
+
+    Rng rng(cfg.seed ^ 0xA5A5A5A5u);
+    buildPalette();
+    buildNightSky(rng);
+    buildFirelight(fire);
+    return true;
+}
+
+void Renderer::buildPalette() {
     for (int i = 0; i < 256; ++i) {
         const float t = static_cast<float>(i) / 255.0f;
         int segment = 0;
@@ -170,42 +187,138 @@ bool Renderer::init(const Config& cfg, std::string& error) {
         }
     }
 
-    // Precalculo de la curva gamma. El mapeo de tonos necesitaria un pow() por
-    // canal y por pixel: a 1280x720 son casi 3 millones de llamadas por frame,
-    // medidas como el mayor coste fijo del render. Con la tabla queda en una
-    // division y una lectura, y el coste por frame baja a menos de la mitad.
     for (int i = 0; i < kGammaLutSize; ++i) {
         const float mapped = static_cast<float>(i) / (kGammaLutSize - 1);
-        const float gamma  = std::pow(mapped, 1.0f / 2.2f);
-        gammaLut_[i] = static_cast<uint8_t>(gamma * 255.0f + 0.5f);
+        gammaLut_[i] = static_cast<uint8_t>(std::pow(mapped, 1.0f / 2.2f) * 255.0f + 0.5f);
     }
-    return true;
+}
+
+void Renderer::buildNightSky(Rng& rng) {
+    const int horizon = static_cast<int>(static_cast<float>(height_) * kHorizonRatio);
+    const float blend = static_cast<float>(height_) * 0.035f;
+
+    for (int y = 0; y < height_; ++y) {
+        const float skyDepth = static_cast<float>(y) / static_cast<float>(std::max(1, horizon));
+        const float onGround = clamp01((static_cast<float>(y - horizon) + blend) / (2.0f * blend));
+        const float depth = clamp01(static_cast<float>(y - horizon) /
+                                    static_cast<float>(std::max(1, height_ - horizon)));
+
+        const float sky[3] = {
+            0.0055f + 0.0060f * skyDepth,
+            0.0065f + 0.0050f * skyDepth,
+            0.0210f + 0.0040f * skyDepth,
+        };
+        const float fade = 1.0f - 0.45f * depth;
+
+        for (int x = 0; x < width_; ++x) {
+            const float dim   = vignetteAt(x, y, width_, height_);
+            const float grain = 0.75f + 0.50f * rng.nextFloat();
+            const float soil[3] = {
+                0.0062f * grain * fade,
+                0.0044f * grain * fade,
+                0.0034f * grain * fade,
+            };
+            float* out = &background_[(static_cast<size_t>(y) * width_ + x) * 3];
+            for (int c = 0; c < 3; ++c) {
+                out[c] = (sky[c] + (soil[c] - sky[c]) * onGround) * dim;
+            }
+        }
+    }
+
+    stars_.clear();
+    stars_.reserve(kStarCount);
+    const int starCeiling = static_cast<int>(static_cast<float>(horizon) * 0.94f);
+    for (int i = 0; i < kStarCount; ++i) {
+        const int x = static_cast<int>(rng.nextFloat() * static_cast<float>(width_));
+        const int y = static_cast<int>(rng.nextFloat() * static_cast<float>(starCeiling));
+        if (x >= width_ || y >= height_) continue;
+        const float far = 1.0f - static_cast<float>(y) / static_cast<float>(starCeiling);
+        stars_.push_back({y * width_ + x,
+                          rng.range(0.10f, 0.85f) * (0.45f + 0.55f * far) *
+                              vignetteAt(x, y, width_, height_),
+                          rng.range(0.0f, 6.2831853f)});
+    }
+}
+
+void Renderer::buildFirelight(const FireSystem& fire) {
+    const int   horizon   = static_cast<int>(static_cast<float>(height_) * kHorizonRatio);
+    const float centerX   = fire.hearthX();
+    const float centerY   = fire.hearthY();
+    const float blend     = static_cast<float>(height_) * 0.035f;
+    const float poolRange = fire.hearthHalfWidth() * 2.2f;
+    const float airRange  = fire.hearthHalfWidth() * 2.8f;
+
+    for (int y = 0; y < height_; ++y) {
+        const float dy = static_cast<float>(y) - centerY;
+        const float onGround =
+            clamp01((static_cast<float>(y - horizon) + blend) / (2.0f * blend));
+
+        for (int x = 0; x < width_; ++x) {
+            const float dx = static_cast<float>(x) - centerX;
+
+            const float pool = std::sqrt(dx * dx + (dy * 2.6f) * (dy * 2.6f)) / poolRange;
+            const float ground = 0.34f / (1.0f + pool * pool * pool);
+
+            const float halo = std::sqrt(dx * dx + (dy * 1.15f) * (dy * 1.15f)) / airRange;
+            const float air = 0.13f / (1.0f + 2.4f * halo * halo);
+
+            firelight_[static_cast<size_t>(y) * width_ + x] =
+                (air + (ground - air) * onGround) * vignetteAt(x, y, width_, height_);
+        }
+    }
+}
+
+void Renderer::accumulateStars(float time) {
+    for (const Star& star : stars_) {
+        const float twinkle = star.brightness *
+                              (0.55f + 0.45f * std::sin(time * 1.7f + star.phase));
+        float* out = &field_[static_cast<size_t>(star.pixel) * 3];
+        out[0] += kStarColor[0] * twinkle;
+        out[1] += kStarColor[1] * twinkle;
+        out[2] += kStarColor[2] * twinkle;
+    }
 }
 
 void Renderer::accumulateParticles(const FireSystem& fire) {
-    const float exposure = intensity_ * densidad_;
+    const float exposure  = intensity_ * density_;
+    const float hearthY   = fire.hearthY();
+    const float blueRange = 70.0f * fire.scale();
 
     for (const Particle& p : fire.particles()) {
-        // El brillo emitido crece mas rapido que la temperatura (ley de
-        // radiacion): una particula tibia casi no aporta luz.
-        const float emission = p.temp * p.temp *
-                               (p.isEmber ? kEmberBoost : kFlameBoost) * exposure;
-        if (emission <= 0.008f) continue;  // descarta particulas ya apagadas
+        float colorR, colorG, colorB;
 
-        const int   index  = std::min(255, static_cast<int>(p.temp * 255.0f));
-        const float colorR = blackbody_[index][0] * p.tintR * emission;
-        const float colorG = blackbody_[index][1] * p.tintG * emission;
-        const float colorB = blackbody_[index][2] * p.tintB * emission;
+        if (p.kind == ParticleKind::Smoke) {
+            const float emission = (0.35f + p.temp) * kSmokeBoost * exposure;
+            colorR = kSmokeColor[0] * p.tintR * emission;
+            colorG = kSmokeColor[1] * p.tintG * emission;
+            colorB = kSmokeColor[2] * p.tintB * emission;
+        } else {
+            const float boost = (p.kind == ParticleKind::Ember) ? kEmberBoost : kFlameBoost;
+            const float emission = p.temp * p.temp * boost * exposure;
+            if (emission <= 0.008f) continue;
 
-        // El brillo se estira verticalmente en funcion de la velocidad de
-        // ascenso: es lo que convierte manchas redondas en lenguas de fuego.
+            const int index = std::min(255, static_cast<int>(p.temp * 255.0f));
+            colorR = blackbody_[index][0] * p.tintR * emission;
+            colorG = blackbody_[index][1] * p.tintG * emission;
+            colorB = blackbody_[index][2] * p.tintB * emission;
+
+            if (p.kind == ParticleKind::Flame) {
+                const float blue = clamp01((p.temp - 0.88f) * 8.0f) *
+                                   clamp01(1.0f - (hearthY - p.y) / blueRange) * 0.80f;
+                if (blue > 0.0f) {
+                    colorR += (kBlueCore[0] * emission - colorR) * blue;
+                    colorG += (kBlueCore[1] * emission - colorG) * blue;
+                    colorB += (kBlueCore[2] * emission - colorB) * blue;
+                }
+            }
+        }
+
         const float stretch = std::min(kMaxStretch, 1.0f + std::fabs(p.vy) * 0.006f);
         const float radiusX = p.radius;
         const float radiusY = p.radius * stretch;
-        const float invRadiusXSq = 1.0f / (radiusX * radiusX);
-        const float invRadiusYSq = 1.0f / (radiusY * radiusY);
+        const float invX    = 1.0f / (radiusX * radiusX);
+        const float invY    = 1.0f / (radiusY * radiusY);
 
-        // Recorte de la elipse de brillo contra los bordes de la ventana.
         const int x0 = std::max(0,           static_cast<int>(p.x - radiusX));
         const int x1 = std::min(width_  - 1, static_cast<int>(p.x + radiusX));
         const int y0 = std::max(0,           static_cast<int>(p.y - radiusY));
@@ -213,14 +326,13 @@ void Renderer::accumulateParticles(const FireSystem& fire) {
 
         for (int y = y0; y <= y1; ++y) {
             const float dy   = static_cast<float>(y) - p.y;
-            const float dySq = dy * dy * invRadiusYSq;
+            const float dySq = dy * dy * invY;
             if (dySq >= 1.0f) continue;
             float* row = &field_[(static_cast<size_t>(y) * width_ + x0) * 3];
             for (int x = x0; x <= x1; ++x, row += 3) {
                 const float dx = static_cast<float>(x) - p.x;
-                const float d2 = dx * dx * invRadiusXSq + dySq;
+                const float d2 = dx * dx * invX + dySq;
                 if (d2 >= 1.0f) continue;
-                // Caida suave (1 - d^2)^2: nucleo brillante, borde difuso.
                 const float falloff = 1.0f - d2;
                 const float weight  = falloff * falloff;
                 row[0] += colorR * weight;
@@ -231,89 +343,157 @@ void Renderer::accumulateParticles(const FireSystem& fire) {
     }
 }
 
-void Renderer::accumulateHearth(const FireSystem& fire) {
-    // Halo ancho y calido alrededor del lecho de brasas: da la sensacion de
-    // que la fogata ilumina el entorno en lugar de flotar en el vacio.
-    const float glow     = fire.emberGlow() * intensity_;
-    const float centerX  = fire.hearthX();
-    const float centerY  = fire.hearthY();
-    const float radius   = fire.hearthHalfWidth() * 3.2f;
-    const float radiusSq = radius * radius;
+void Renderer::composite(float glow) {
+    for (int y = 0; y < height_; ++y) {
+        const int blockY = y / kBloomScale;
+        float* raw = &bloomRaw_[static_cast<size_t>(blockY) * bloomWidth_ * 3];
+        if (y % kBloomScale == 0) {
+            std::fill(raw, raw + static_cast<size_t>(bloomWidth_) * 3, 0.0f);
+        }
 
-    const int x0 = std::max(0,           static_cast<int>(centerX - radius));
-    const int x1 = std::min(width_  - 1, static_cast<int>(centerX + radius));
-    const int y0 = std::max(0,           static_cast<int>(centerY - radius));
-    const int y1 = std::min(height_ - 1, static_cast<int>(centerY + radius));
+        const float* halo = &bloom_[static_cast<size_t>(blockY) * bloomWidth_ * 3];
+        const float* bg   = &background_[static_cast<size_t>(y) * width_ * 3];
+        const float* lit  = &firelight_[static_cast<size_t>(y) * width_];
+        float*       src  = &field_[static_cast<size_t>(y) * width_ * 3];
+        uint32_t*    dst  = &pixels_[static_cast<size_t>(y) * pitch_];
 
-    for (int y = y0; y <= y1; ++y) {
-        const float dy = static_cast<float>(y) - centerY;
-        // El halo se aplasta verticalmente: la luz se derrama sobre el suelo.
-        const float dySq = (dy * 1.6f) * (dy * 1.6f);
-        float* row = &field_[(static_cast<size_t>(y) * width_ + x0) * 3];
-        for (int x = x0; x <= x1; ++x, row += 3) {
-            const float dx = static_cast<float>(x) - centerX;
-            const float d2 = dx * dx + dySq;
-            if (d2 >= radiusSq) continue;
-            const float falloff = 1.0f - d2 / radiusSq;
-            const float weight  = falloff * falloff * falloff * glow;
-            row[0] += 0.42f * weight;
-            row[1] += 0.14f * weight;
-            row[2] += 0.03f * weight;
+        int blockX = 0;
+        int blockStep = 0;
+
+        for (int x = 0; x < width_; ++x, src += 3, bg += 3) {
+            const float* glowRow = halo + blockX * 3;
+            float*       acc     = raw + blockX * 3;
+            const float  warm    = lit[x] * glow;
+
+            uint32_t argb = 0xFF000000u;
+            for (int c = 0; c < 3; ++c) {
+                const float light = src[c];
+                const float value = light * kExposure + glowRow[c] * kBloomStrength +
+                                    bg[c] + warm * kFirelightColor[c];
+                const float mapped = value / (1.0f + value);
+                argb |= static_cast<uint32_t>(
+                            gammaLut_[static_cast<int>(mapped * (kGammaLutSize - 1))])
+                        << (16 - 8 * c);
+                acc[c] += light;
+                src[c] = light * kTrailDecay;
+            }
+            dst[x] = argb;
+
+            if (++blockStep == kBloomScale) {
+                blockStep = 0;
+                ++blockX;
+            }
         }
     }
 }
 
-void Renderer::toneMap() {
-    // Mapeo de tonos de Reinhard, c/(1+c), seguido de correccion gamma: el
-    // primero comprime el rango dinamico sin recortar (por eso el nucleo se ve
-    // claro y el halo naranja en lugar de un borron blanco) y la segunda pasa
-    // de intensidad lineal a la respuesta de un monitor.
-    //
-    // La curva gamma sale de la tabla precalculada en init(): sustituir el
-    // pow() por canal por una lectura de memoria fue la optimizacion mas
-    // rentable de todo el render secuencial.
-    for (int y = 0; y < height_; ++y) {
-        // Fondo nocturno: azul apagado arriba, un poco mas calido abajo.
-        const float skyT = static_cast<float>(y) / static_cast<float>(height_);
-        const float ambient[3] = {
-            0.006f + 0.010f * skyT,
-            0.006f + 0.006f * skyT,
-            0.026f - 0.012f * skyT,
-        };
+void Renderer::blurBloom() {
+    const float norm = 1.0f / (static_cast<float>(2 * kBloomRadius + 1) *
+                               static_cast<float>(kBloomScale * kBloomScale));
 
-        float*    src = &field_[static_cast<size_t>(y) * width_ * 3];
-        uint32_t* dst = &pixels_[static_cast<size_t>(y) * width_];
-
-        for (int x = 0; x < width_; ++x, src += 3) {
-            uint32_t argb = 0xFF000000u;
+    for (int y = 0; y < bloomHeight_; ++y) {
+        const float* src = &bloomRaw_[static_cast<size_t>(y) * bloomWidth_ * 3];
+        float*       dst = &bloomScratch_[static_cast<size_t>(y) * bloomWidth_ * 3];
+        float sum[3] = {0.0f, 0.0f, 0.0f};
+        for (int x = -kBloomRadius; x <= kBloomRadius; ++x) {
+            const int sample = std::min(bloomWidth_ - 1, std::max(0, x));
+            for (int c = 0; c < 3; ++c) sum[c] += src[sample * 3 + c];
+        }
+        for (int x = 0; x < bloomWidth_; ++x) {
+            const int add = std::min(bloomWidth_ - 1, x + kBloomRadius + 1);
+            const int sub = std::max(0, x - kBloomRadius);
             for (int c = 0; c < 3; ++c) {
-                const float value  = src[c] * kExposure + ambient[c];
-                const float mapped = value / (1.0f + value);
-                const int   index  = static_cast<int>(mapped * (kGammaLutSize - 1));
-                argb |= static_cast<uint32_t>(gammaLut_[index]) << (16 - 8 * c);
-                // Atenuacion de la estela hecha en el mismo recorrido: evita
-                // una segunda pasada completa sobre el campo cada frame.
-                src[c] *= kTrailDecay;
+                dst[x * 3 + c] = sum[c] * norm;
+                sum[c] += src[add * 3 + c] - src[sub * 3 + c];
             }
-            dst[x] = argb;
+        }
+    }
+
+    const int stride = bloomWidth_ * 3;
+    const float vertical = 1.0f / static_cast<float>(2 * kBloomRadius + 1);
+    for (int x = 0; x < bloomWidth_; ++x) {
+        const float* src = &bloomScratch_[static_cast<size_t>(x) * 3];
+        float*       dst = &bloom_[static_cast<size_t>(x) * 3];
+        float sum[3] = {0.0f, 0.0f, 0.0f};
+        for (int y = -kBloomRadius; y <= kBloomRadius; ++y) {
+            const int sample = std::min(bloomHeight_ - 1, std::max(0, y));
+            for (int c = 0; c < 3; ++c) sum[c] += src[sample * stride + c];
+        }
+        for (int y = 0; y < bloomHeight_; ++y) {
+            const int add = std::min(bloomHeight_ - 1, y + kBloomRadius + 1);
+            const int sub = std::max(0, y - kBloomRadius);
+            for (int c = 0; c < 3; ++c) {
+                dst[y * stride + c] = sum[c] * vertical;
+                sum[c] += src[add * stride + c] - src[sub * stride + c];
+            }
+        }
+    }
+}
+
+void Renderer::drawStones(const FireSystem& fire) {
+    const float halfWidth = fire.hearthHalfWidth();
+    const float centerX   = fire.hearthX();
+    const float centerY   = fire.hearthY() + halfWidth * 0.70f;
+    const float ringX     = halfWidth * 2.7f;
+    const float ringY     = halfWidth * 0.42f;
+    const float glow      = fire.flicker();
+
+    for (int i = 0; i < 7; ++i) {
+        const float angle = 3.1415927f * (0.05f + 0.90f * static_cast<float>(i) / 6.0f);
+        const float stoneX = centerX + std::cos(angle) * ringX;
+        const float stoneY = centerY + std::sin(angle) * ringY;
+        const float stoneW = halfWidth * (0.30f + 0.13f * std::sin(angle * 5.3f + 1.1f));
+        const float stoneH = stoneW * 0.72f;
+        const float toFire = clamp01(1.0f - std::fabs(stoneX - centerX) / (ringX * 1.15f));
+
+        const int x0 = std::max(0,           static_cast<int>(stoneX - stoneW));
+        const int x1 = std::min(width_  - 1, static_cast<int>(stoneX + stoneW));
+        const int y0 = std::max(0,           static_cast<int>(stoneY - stoneH));
+        const int y1 = std::min(height_ - 1, static_cast<int>(stoneY + stoneH));
+
+        for (int y = y0; y <= y1; ++y) {
+            const float ny = (static_cast<float>(y) - stoneY) / stoneH;
+            for (int x = x0; x <= x1; ++x) {
+                const float nx = (static_cast<float>(x) - stoneX) / stoneW;
+                const float d2 = nx * nx + ny * ny;
+                if (d2 >= 1.0f) continue;
+
+                if (ny > 0.45f) continue;
+
+                const float dome  = std::sqrt(1.0f - d2);
+                const float shade = 0.28f + 0.72f * dome;
+                const float heat  = glow * toFire * clamp01(0.34f - ny * 0.66f) * dome;
+
+                const int r = std::min(255, static_cast<int>(38.0f * shade + heat * 235.0f));
+                const int g = std::min(255, static_cast<int>(31.0f * shade + heat * 112.0f));
+                const int b = std::min(255, static_cast<int>(27.0f * shade + heat *  38.0f));
+
+                const float alpha = std::min(1.0f, dome * 5.0f);
+                const size_t offset = static_cast<size_t>(y) * pitch_ + x;
+                const uint32_t back = pixels_[offset];
+                const int mr = static_cast<int>(((back >> 16) & 0xFF) + (r - static_cast<int>((back >> 16) & 0xFF)) * alpha);
+                const int mg = static_cast<int>(((back >>  8) & 0xFF) + (g - static_cast<int>((back >>  8) & 0xFF)) * alpha);
+                const int mb = static_cast<int>(( back        & 0xFF) + (b - static_cast<int>( back        & 0xFF)) * alpha);
+                pixels_[offset] = 0xFF000000u | (static_cast<uint32_t>(mr) << 16) |
+                                  (static_cast<uint32_t>(mg) << 8) | static_cast<uint32_t>(mb);
+            }
         }
     }
 }
 
 void Renderer::drawLogs(const FireSystem& fire) {
-    // Tres lenos cruzados en la base, dibujados como segmentos gruesos ya
-    // sobre la imagen final para que tapen la llama y aporten profundidad.
-    const float cx    = fire.hearthX();
-    const float cy    = fire.hearthY() + fire.hearthHalfWidth() * 0.45f;
-    const float span  = fire.hearthHalfWidth() * 2.1f;
-    const float thick = fire.hearthHalfWidth() * 0.30f;
-    const float glow  = fire.emberGlow();
+    const float halfWidth = fire.hearthHalfWidth();
+    const float centerX   = fire.hearthX();
+    const float centerY   = fire.hearthY() + halfWidth * 0.45f;
+    const float span      = halfWidth * 2.1f;
+    const float thick     = halfWidth * 0.30f;
+    const float glow      = fire.flicker();
 
     struct Segment { float x0, y0, x1, y1; };
     const Segment logs[3] = {
-        {cx - span,         cy + thick * 0.6f, cx + span * 0.85f, cy - thick * 0.5f},
-        {cx - span * 0.80f, cy - thick * 0.7f, cx + span,         cy + thick * 0.5f},
-        {cx - span * 0.35f, cy + thick * 1.1f, cx + span * 0.40f, cy + thick * 1.3f},
+        {centerX - span,         centerY + thick * 0.6f, centerX + span * 0.85f, centerY - thick * 0.5f},
+        {centerX - span * 0.80f, centerY - thick * 0.7f, centerX + span,         centerY + thick * 0.5f},
+        {centerX - span * 0.35f, centerY + thick * 1.1f, centerX + span * 0.40f, centerY + thick * 1.3f},
     };
 
     for (const Segment& seg : logs) {
@@ -328,41 +508,31 @@ void Renderer::drawLogs(const FireSystem& fire) {
 
         for (int y = y0; y <= y1; ++y) {
             for (int x = x0; x <= x1; ++x) {
-                // Distancia del pixel al segmento (proyeccion acotada a [0,1]).
                 const float px = static_cast<float>(x) - seg.x0;
                 const float py = static_cast<float>(y) - seg.y0;
-                float t = (px * dx + py * dy) / lenSq;
-                t = std::min(1.0f, std::max(0.0f, t));
-                const float ox   = px - dx * t;
-                const float oy   = py - dy * t;
+                const float t  = clamp01((px * dx + py * dy) / lenSq);
+                const float ox = px - dx * t;
+                const float oy = py - dy * t;
                 const float dist = std::sqrt(ox * ox + oy * oy);
                 if (dist > thick) continue;
 
-                // Las brasas viven en el centro del leno: cuanto mas cerca del
-                // eje de la fogata, mas incandescente se ve la madera.
-                const float toCenter = std::fabs(static_cast<float>(x) - cx) / span;
-                const float heat = glow * std::max(0.0f, 1.0f - toCenter) *
-                                   (1.0f - dist / thick) * 0.9f;
-                const float shade = 0.35f + 0.65f * (1.0f - dist / thick);
+                const float toCenter = std::fabs(static_cast<float>(x) - centerX) / span;
+                const float heat  = glow * std::max(0.0f, 1.0f - toCenter) *
+                                    (1.0f - dist / thick) * 0.95f;
+                const float shade = 0.32f + 0.68f * (1.0f - dist / thick);
 
-                const int r = std::min(255, static_cast<int>(26.0f * shade + heat * 235.0f));
-                const int g = std::min(255, static_cast<int>(16.0f * shade + heat * 105.0f));
-                const int b = std::min(255, static_cast<int>(12.0f * shade + heat *  30.0f));
+                const int r = std::min(255, static_cast<int>(28.0f * shade + heat * 240.0f));
+                const int g = std::min(255, static_cast<int>(17.0f * shade + heat * 108.0f));
+                const int b = std::min(255, static_cast<int>(13.0f * shade + heat *  30.0f));
 
-                // Borde suavizado: el ultimo 20% del grosor se mezcla con el fondo.
                 const float alpha = std::min(1.0f, (thick - dist) / (thick * 0.2f + 1e-3f));
-                const size_t offset = static_cast<size_t>(y) * width_ + x;
-                const uint32_t dst = pixels_[offset];
-                const int dr = static_cast<int>((dst >> 16) & 0xFF);
-                const int dg = static_cast<int>((dst >>  8) & 0xFF);
-                const int db = static_cast<int>( dst        & 0xFF);
-                const int mr = static_cast<int>(dr + (r - dr) * alpha);
-                const int mg = static_cast<int>(dg + (g - dg) * alpha);
-                const int mb = static_cast<int>(db + (b - db) * alpha);
-                pixels_[offset] = 0xFF000000u |
-                                  (static_cast<uint32_t>(mr) << 16) |
-                                  (static_cast<uint32_t>(mg) <<  8) |
-                                   static_cast<uint32_t>(mb);
+                const size_t offset = static_cast<size_t>(y) * pitch_ + x;
+                const uint32_t back = pixels_[offset];
+                const int mr = static_cast<int>(((back >> 16) & 0xFF) + (r - static_cast<int>((back >> 16) & 0xFF)) * alpha);
+                const int mg = static_cast<int>(((back >>  8) & 0xFF) + (g - static_cast<int>((back >>  8) & 0xFF)) * alpha);
+                const int mb = static_cast<int>(( back        & 0xFF) + (b - static_cast<int>( back        & 0xFF)) * alpha);
+                pixels_[offset] = 0xFF000000u | (static_cast<uint32_t>(mr) << 16) |
+                                  (static_cast<uint32_t>(mg) << 8) | static_cast<uint32_t>(mb);
             }
         }
     }
@@ -379,20 +549,19 @@ void Renderer::drawText(int x, int y, int pixelSize, const std::string& text,
             for (int row = 0; row < 7; ++row) {
                 for (int col = 0; col < 5; ++col) {
                     if ((glyph[row] & (0x10 >> col)) == 0) continue;
-                    // Cada punto del glifo se expande a un bloque solido.
                     for (int sy = 0; sy < pixelSize; ++sy) {
                         const int py = y + row * pixelSize + sy;
                         if (py < 0 || py >= height_) continue;
                         for (int sx = 0; sx < pixelSize; ++sx) {
                             const int px = cursorX + col * pixelSize + sx;
                             if (px < 0 || px >= width_) continue;
-                            pixels_[static_cast<size_t>(py) * width_ + px] = color;
+                            pixels_[static_cast<size_t>(py) * pitch_ + px] = color;
                         }
                     }
                 }
             }
         }
-        cursorX += 6 * pixelSize;  // 5 columnas de glifo + 1 de separacion
+        cursorX += 6 * pixelSize;
     }
 }
 
@@ -400,7 +569,6 @@ void Renderer::drawHud(const FireSystem& fire, float fps) {
     const int size   = std::max(2, height_ / 260);
     const int margin = 10 * size;
 
-    // Sombra negra desplazada para que el texto se lea sobre la llama.
     const std::string fpsLine = "FPS " + oneDecimal(fps);
     drawText(margin + size, margin + size, size * 2, fpsLine, 0, 0, 0);
     drawText(margin, margin, size * 2, fpsLine, 255, 236, 190);
@@ -416,14 +584,26 @@ void Renderer::drawHud(const FireSystem& fire, float fps) {
 }
 
 void Renderer::drawFrame(const FireSystem& fire, float fps) {
+    accumulateStars(fire.elapsed());
     accumulateParticles(fire);
-    accumulateHearth(fire);
-    toneMap();
-    drawLogs(fire);
-    drawHud(fire, fps);
 
-    SDL_UpdateTexture(texture_, nullptr, pixels_.data(),
-                      width_ * static_cast<int>(sizeof(uint32_t)));
+    void* locked = nullptr;
+    int   bytePitch = 0;
+    if (SDL_LockTexture(texture_, nullptr, &locked, &bytePitch) == 0) {
+        pixels_ = static_cast<uint32_t*>(locked);
+        pitch_  = bytePitch / static_cast<int>(sizeof(uint32_t));
+
+        composite(fire.flicker() * intensity_);
+        drawLogs(fire);
+        drawStones(fire);
+        drawHud(fire, fps);
+
+        SDL_UnlockTexture(texture_);
+        pixels_ = nullptr;
+    }
+
+    blurBloom();
+
     SDL_RenderClear(renderer_);
     SDL_RenderCopy(renderer_, texture_, nullptr, nullptr);
     SDL_RenderPresent(renderer_);
