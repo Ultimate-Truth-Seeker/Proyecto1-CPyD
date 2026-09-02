@@ -16,28 +16,67 @@ Distribuida. La version paralela con OpenMP se construye a partir de esta.
 
 ![Captura del screensaver](docs/captura.png)
 
-## Dependencias
+## Como correrlo desde cero
 
-- Compilador C++17 (`g++`)
-- SDL2
+### Windows (MSYS2)
 
-MSYS2 / MinGW64 (Windows):
+1. Instalar MSYS2 desde <https://www.msys2.org> y abrir la terminal
+   **"MSYS2 MINGW64"**. Es importante que sea esa y no "MSYS2 MSYS" ni
+   "UCRT64": son shells distintas, con compiladores y rutas distintas.
+
+2. Instalar las dependencias:
+
 ```bash
-pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2 mingw-w64-x86_64-pkgconf make
+pacman -S --needed git make mingw-w64-x86_64-gcc mingw-w64-x86_64-SDL2 mingw-w64-x86_64-pkgconf
 ```
 
-Ubuntu / Debian:
-```bash
-sudo apt-get install build-essential libsdl2-dev pkg-config
-```
-
-## Compilar y ejecutar
+3. Clonar, compilar y ejecutar:
 
 ```bash
-cd fogata
+git clone https://github.com/Ultimate-Truth-Seeker/Proyecto1-CPyD.git
+cd Proyecto1-CPyD/fogata
 make
 ./build/fogata
 ```
+
+Todo esto desde la misma terminal MINGW64. El ejecutable necesita `SDL2.dll`,
+que vive en `C:/msys64/mingw64/bin`; esa carpeta ya esta en el PATH de la
+terminal MINGW64, y por eso conviene ejecutarlo desde ahi.
+
+### Linux (Ubuntu / Debian)
+
+```bash
+sudo apt-get install build-essential libsdl2-dev pkg-config git
+git clone https://github.com/Ultimate-Truth-Seeker/Proyecto1-CPyD.git
+cd Proyecto1-CPyD/fogata
+make
+./build/fogata
+```
+
+### Otros comandos utiles
+
+```bash
+make clean
+```
+
+```bash
+make run
+```
+
+```bash
+./build/fogata --help
+```
+
+## Problemas frecuentes
+
+| Sintoma | Causa y solucion |
+|---|---|
+| `SDL2/SDL.h: No such file or directory` | Falta el paquete de SDL2, o se compila desde la shell equivocada. En Windows tiene que ser la terminal **MINGW64**, con `mingw-w64-x86_64-SDL2` instalado. |
+| `No se encontro SDL2.dll` al ejecutar | Se lanzo el `.exe` desde el Explorador, `cmd` o Git Bash. Ejecutelo desde la terminal MINGW64, o agregue la carpeta `mingw64/bin` de MSYS2 al PATH del sistema. |
+| `Cannot create temporary file in C:\WINDOWS\` al compilar | Se esta usando el `make` de MSYS2 desde Git Bash, que mezcla las rutas de los dos entornos. Compile desde la terminal MINGW64, o use `mingw32-make` con `mingw64/bin` en el PATH. |
+| `make: command not found` | Falta el paquete `make` (`pacman -S make`). |
+| FPS mas bajos que los de la tabla | Normal con otras aplicaciones pesadas abiertas, o si se quito `-march=native` del Makefile. Baje `-n` para recuperar FPS. |
+| Un binario compilado en otra maquina no arranca | `-march=native` genera codigo para el procesador donde se compilo. Recompile en la maquina donde va a ejecutarlo. |
 
 ## Parametros
 
