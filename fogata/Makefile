@@ -1,6 +1,16 @@
 CXX      ?= g++
-CXXFLAGS := -std=c++17 -O3 -ffast-math -march=native -Wall -Wextra -Iinclude
+CXXFLAGS_BASE := -std=c++17 -O3 -ffast-math -march=native -Wall -Wextra -Iinclude
+CXXFLAGS := $(CXXFLAGS_BASE)
 LDLIBS   := -lm
+
+# OpenMP support (set BUILD_TYPE=parallel to enable)
+BUILD_TYPE ?= sequential
+ifeq ($(BUILD_TYPE),parallel)
+  CXXFLAGS += -fopenmp
+  TARGET_SUFFIX := -parallel
+else
+  TARGET_SUFFIX := -sequential
+endif
 
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell pkg-config --libs   sdl2 2>/dev/null)
@@ -14,15 +24,25 @@ ifeq ($(strip $(SDL_LIBS)),)
 endif
 
 SRC_DIR   := src
-BUILD_DIR := build
+BUILD_DIR := build$(TARGET_SUFFIX)
 TARGET    := $(BUILD_DIR)/fogata
 
 SOURCES := $(wildcard $(SRC_DIR)/*.cpp)
 OBJECTS := $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(SOURCES))
 
-.PHONY: all run clean
+.PHONY: all sequential parallel run clean
 
-all: $(TARGET)
+all: sequential
+
+sequential:
+	@echo "Building SEQUENTIAL version (pragmas disabled)..."
+	$(MAKE) BUILD_TYPE=sequential _build
+
+parallel:
+	@echo "Building PARALLEL version (OpenMP enabled)..."
+	$(MAKE) BUILD_TYPE=parallel _build
+
+_build: $(TARGET)
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -33,8 +53,11 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
 $(TARGET): $(OBJECTS)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(SDL_LIBS) $(LDLIBS)
 
-run: $(TARGET)
-	./$(TARGET)
+run: sequential
+	./$(BUILD_DIR)/fogata
+
+run-parallel: parallel
+	./$(BUILD_DIR)/fogata
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf build-sequential build-parallel
