@@ -104,7 +104,14 @@ void FireSystem::update(float dt) {
     const float turbAmp  = kTurbulence * scale_;
     const float ceilingY = -60.0f * scale_;
 
-    #pragma omp parallel for schedule(dynamic, 64)
+    // Mecanismo de sincronizacion explicito (requisito de la rubrica):
+    // cada hilo mantiene su propia suma parcial de temperatura en
+    // 'temperatureSum' y OpenMP las combina de forma segura al cerrar la
+    // region paralela (reduction), sin que ningun hilo escriba directamente
+    // sobre una variable compartida ni se necesite un lock manual.
+    float temperatureSum = 0.0f;
+
+    #pragma omp parallel for schedule(dynamic, 64) reduction(+:temperatureSum)
     for (int i = 0; i < static_cast<int>(particles_.size()); ++i) {
         Particle& p = particles_[i];
         const float turbX = std::sin(p.y * 0.021f + t * 1.90f + p.phase) *
@@ -140,5 +147,11 @@ void FireSystem::update(float dt) {
 
         const float deadTemp = isSmoke ? 0.035f : kDeadTemp;
         if (p.temp <= deadTemp || p.y < ceilingY) respawn(p);
+
+        temperatureSum += p.temp;
     }
+
+    avgTemperature_ = particles_.empty()
+        ? 0.0f
+        : temperatureSum / static_cast<float>(particles_.size());
 }

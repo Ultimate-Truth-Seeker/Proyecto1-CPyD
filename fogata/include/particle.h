@@ -51,6 +51,13 @@ class FireSystem {
     float elapsed()         const { return elapsed_; }
     float flicker()         const;
 
+    // Temperatura promedio de todas las particulas, calculada durante el
+    // ultimo update() con una reduccion OpenMP explicita (ver particle.cpp).
+    // Es una metrica agregada de memoria compartida: cada hilo acumula su
+    // propia suma parcial y OpenMP las combina de forma segura al final de
+    // la region paralela, sin necesidad de locks manuales.
+    float averageTemperature() const { return avgTemperature_; }
+
  private:
     void respawn(Particle& particle);
 
@@ -62,6 +69,7 @@ class FireSystem {
     float scale_;
     float wind_;
     float elapsed_ = 0.0f;
+    float avgTemperature_ = 0.0f;
 };
 
 #endif  // FOGATA_PARTICLE_H

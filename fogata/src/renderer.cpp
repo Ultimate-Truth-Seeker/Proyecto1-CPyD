@@ -581,7 +581,8 @@ void Renderer::drawHud(const FireSystem& fire, float fps) {
 
     const std::string infoLine =
         "N " + std::to_string(fire.particles().size()) + "   " +
-        std::to_string(width_) + "X" + std::to_string(height_) + "   SECUENCIAL";
+        std::to_string(width_) + "X" + std::to_string(height_) + "   TEMP " +
+        oneDecimal(fire.averageTemperature());
     const int infoY = margin + 16 * size;
     drawText(margin + 1, infoY + 1, size, infoLine, 0, 0, 0);
     drawText(margin, infoY, size, infoLine, 210, 160, 110);
