@@ -104,7 +104,9 @@ void FireSystem::update(float dt) {
     const float turbAmp  = kTurbulence * scale_;
     const float ceilingY = -60.0f * scale_;
 
-    for (Particle& p : particles_) {
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int i = 0; i < static_cast<int>(particles_.size()); ++i) {
+        Particle& p = particles_[i];
         const float turbX = std::sin(p.y * 0.021f + t * 1.90f + p.phase) *
                             std::cos(p.x * 0.017f - t * 1.15f);
         const float turbY = std::cos(p.x * 0.024f - t * 1.40f + p.phase) *

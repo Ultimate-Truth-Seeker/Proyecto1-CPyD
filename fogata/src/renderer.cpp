@@ -284,7 +284,9 @@ void Renderer::accumulateParticles(const FireSystem& fire) {
     const float hearthY   = fire.hearthY();
     const float blueRange = 70.0f * fire.scale();
 
-    for (const Particle& p : fire.particles()) {
+    #pragma omp parallel for schedule(dynamic, 64)
+    for (int pi = 0; pi < static_cast<int>(fire.particles().size()); ++pi) {
+        const Particle& p = fire.particles()[pi];
         float colorR, colorG, colorB;
 
         if (p.kind == ParticleKind::Smoke) {
@@ -344,6 +346,7 @@ void Renderer::accumulateParticles(const FireSystem& fire) {
 }
 
 void Renderer::composite(float glow) {
+    #pragma omp parallel for
     for (int y = 0; y < height_; ++y) {
         const int blockY = y / kBloomScale;
         float* raw = &bloomRaw_[static_cast<size_t>(blockY) * bloomWidth_ * 3];
@@ -391,6 +394,7 @@ void Renderer::blurBloom() {
     const float norm = 1.0f / (static_cast<float>(2 * kBloomRadius + 1) *
                                static_cast<float>(kBloomScale * kBloomScale));
 
+    #pragma omp parallel for
     for (int y = 0; y < bloomHeight_; ++y) {
         const float* src = &bloomRaw_[static_cast<size_t>(y) * bloomWidth_ * 3];
         float*       dst = &bloomScratch_[static_cast<size_t>(y) * bloomWidth_ * 3];
@@ -411,6 +415,8 @@ void Renderer::blurBloom() {
 
     const int stride = bloomWidth_ * 3;
     const float vertical = 1.0f / static_cast<float>(2 * kBloomRadius + 1);
+
+    #pragma omp parallel for
     for (int x = 0; x < bloomWidth_; ++x) {
         const float* src = &bloomScratch_[static_cast<size_t>(x) * 3];
         float*       dst = &bloom_[static_cast<size_t>(x) * 3];
