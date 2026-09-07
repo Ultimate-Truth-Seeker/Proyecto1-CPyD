@@ -58,6 +58,22 @@ class FireSystem {
     // la region paralela, sin necesidad de locks manuales.
     float averageTemperature() const { return avgTemperature_; }
 
+    // Busca la primera particula (en orden de indice) cuya temperatura
+    // supera kCriticalSparkTemp -- una "chispa critica" que dispara un
+    // destello visual en el render. Es una busqueda con corte temprano
+    // (early-exit), no un recorrido completo: la secuencial se detiene en
+    // cuanto encuentra el primer indice que cumple la condicion, y la
+    // paralela reparte el recorrido entre hilos y corta apenas cualquiera
+    // de ellos encuentra un candidato (ver particle.cpp para el mecanismo
+    // de senalizacion). Retorna el indice encontrado, o -1 si ninguna
+    // particula supera el umbral en este frame.
+    //
+    // outIterations recibe cuantas particulas se examinaron en total antes
+    // de detenerse (sumando todos los hilos en la version paralela). Existe
+    // solo para instrumentar el Anexo 3: permite reportar el ahorro de
+    // trabajo real, no solo el tiempo de reloj.
+    int findCriticalSpark(int& outIterations) const;
+
  private:
     void respawn(Particle& particle);
 

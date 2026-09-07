@@ -35,6 +35,7 @@ class Renderer {
     void buildFirelight(const FireSystem& fire);
     void accumulateStars(float time);
     void accumulateParticles(const FireSystem& fire);
+    void buildBloomRaw();
     void composite(float glow);
     void blurBloom();
     void drawStones(const FireSystem& fire);
@@ -59,12 +60,15 @@ class Renderer {
     std::vector<float>    bloomRaw_;
     std::vector<float>    bloomScratch_;
     std::vector<Star>     stars_;
+    std::vector<std::vector<int>> particleTiles_;
 
     uint32_t* pixels_ = nullptr;
     int pitch_ = 0;
 
     int bloomWidth_  = 0;
     int bloomHeight_ = 0;
+    int particleTileWidth_ = 0;
+    int particleTileHeight_ = 0;
 
     float   blackbody_[256][3];
     uint8_t gammaLut_[1024];

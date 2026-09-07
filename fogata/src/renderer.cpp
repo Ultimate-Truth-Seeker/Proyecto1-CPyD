@@ -21,6 +21,7 @@ constexpr int   kGammaLutSize  = 1024;
 constexpr int   kBloomScale    = 4;
 constexpr int   kBloomRadius   = 5;
 constexpr float kBloomStrength = 0.34f;
+constexpr int   kParticleTileSize = 32;
 
 constexpr int   kStarCount     = 520;
 constexpr float kHorizonRatio  = 0.78f;
@@ -166,6 +167,11 @@ bool Renderer::init(const Config& cfg, const FireSystem& fire, std::string& erro
     bloomRaw_.assign(bloom_.size(), 0.0f);
     bloomScratch_.assign(bloom_.size(), 0.0f);
 
+    particleTileWidth_ = (width_ + kParticleTileSize - 1) / kParticleTileSize;
+    particleTileHeight_ = (height_ + kParticleTileSize - 1) / kParticleTileSize;
+    particleTiles_.resize(static_cast<size_t>(particleTileWidth_) *
+                          particleTileHeight_);
+
     Rng rng(cfg.seed ^ 0xA5A5A5A5u);
     buildPalette();
     buildNightSky(rng);
@@ -284,9 +290,44 @@ void Renderer::accumulateParticles(const FireSystem& fire) {
     const float hearthY   = fire.hearthY();
     const float blueRange = 70.0f * fire.scale();
 
-    #pragma omp parallel for schedule(dynamic, 64)
-    for (int pi = 0; pi < static_cast<int>(fire.particles().size()); ++pi) {
-        const Particle& p = fire.particles()[pi];
+    for (std::vector<int>& tile : particleTiles_)
+        tile.clear();
+
+    const std::vector<Particle>& particles = fire.particles();
+    for (int pi = 0; pi < static_cast<int>(particles.size()); ++pi) {
+        const Particle& p = particles[pi];
+        const float stretch = std::min(kMaxStretch, 1.0f + std::fabs(p.vy) * 0.006f);
+        const int x0 = std::max(0, static_cast<int>(p.x - p.radius));
+        const int x1 = std::min(width_ - 1, static_cast<int>(p.x + p.radius));
+        const int y0 = std::max(0, static_cast<int>(p.y - p.radius * stretch));
+        const int y1 = std::min(height_ - 1, static_cast<int>(p.y + p.radius * stretch));
+        if (x0 > x1 || y0 > y1)
+            continue;
+
+        const int tileX0 = x0 / kParticleTileSize;
+        const int tileX1 = x1 / kParticleTileSize;
+        const int tileY0 = y0 / kParticleTileSize;
+        const int tileY1 = y1 / kParticleTileSize;
+        for (int tileY = tileY0; tileY <= tileY1; ++tileY) {
+            for (int tileX = tileX0; tileX <= tileX1; ++tileX) {
+                particleTiles_[static_cast<size_t>(tileY) * particleTileWidth_ + tileX]
+                    .push_back(pi);
+            }
+        }
+    }
+
+    #pragma omp parallel for schedule(dynamic)
+    for (int tileIndex = 0;
+         tileIndex < static_cast<int>(particleTiles_.size()); ++tileIndex) {
+        const int tileX = tileIndex % particleTileWidth_;
+        const int tileY = tileIndex / particleTileWidth_;
+        const int tileX0 = tileX * kParticleTileSize;
+        const int tileY0 = tileY * kParticleTileSize;
+        const int tileX1 = std::min(width_ - 1, tileX0 + kParticleTileSize - 1);
+        const int tileY1 = std::min(height_ - 1, tileY0 + kParticleTileSize - 1);
+
+        for (int pi : particleTiles_[tileIndex]) {
+        const Particle& p = particles[pi];
         float colorR, colorG, colorB;
 
         if (p.kind == ParticleKind::Smoke) {
@@ -321,10 +362,12 @@ void Renderer::accumulateParticles(const FireSystem& fire) {
         const float invX    = 1.0f / (radiusX * radiusX);
         const float invY    = 1.0f / (radiusY * radiusY);
 
-        const int x0 = std::max(0,           static_cast<int>(p.x - radiusX));
-        const int x1 = std::min(width_  - 1, static_cast<int>(p.x + radiusX));
-        const int y0 = std::max(0,           static_cast<int>(p.y - radiusY));
-        const int y1 = std::min(height_ - 1, static_cast<int>(p.y + radiusY));
+        const int x0 = std::max(tileX0, static_cast<int>(p.x - radiusX));
+        const int x1 = std::min(tileX1, static_cast<int>(p.x + radiusX));
+        const int y0 = std::max(tileY0, static_cast<int>(p.y - radiusY));
+        const int y1 = std::min(tileY1, static_cast<int>(p.y + radiusY));
+        if (x0 > x1 || y0 > y1)
+            continue;
 
         for (int y = y0; y <= y1; ++y) {
             const float dy   = static_cast<float>(y) - p.y;
@@ -342,6 +385,27 @@ void Renderer::accumulateParticles(const FireSystem& fire) {
                 row[2] += colorB * weight;
             }
         }
+        }
+    }
+}
+
+void Renderer::buildBloomRaw() {
+    #pragma omp parallel for schedule(static)
+    for (int blockY = 0; blockY < bloomHeight_; ++blockY) {
+        float* raw = &bloomRaw_[static_cast<size_t>(blockY) * bloomWidth_ * 3];
+        std::fill(raw, raw + static_cast<size_t>(bloomWidth_) * 3, 0.0f);
+
+        const int y0 = blockY * kBloomScale;
+        const int y1 = std::min(height_, y0 + kBloomScale);
+        for (int y = y0; y < y1; ++y) {
+            const float* src = &field_[static_cast<size_t>(y) * width_ * 3];
+            for (int x = 0; x < width_; ++x) {
+                float* dst = &raw[(x / kBloomScale) * 3];
+                dst[0] += src[x * 3 + 0];
+                dst[1] += src[x * 3 + 1];
+                dst[2] += src[x * 3 + 2];
+            }
+        }
     }
 }
 
@@ -349,11 +413,6 @@ void Renderer::composite(float glow) {
     #pragma omp parallel for
     for (int y = 0; y < height_; ++y) {
         const int blockY = y / kBloomScale;
-        float* raw = &bloomRaw_[static_cast<size_t>(blockY) * bloomWidth_ * 3];
-        if (y % kBloomScale == 0) {
-            std::fill(raw, raw + static_cast<size_t>(bloomWidth_) * 3, 0.0f);
-        }
-
         const float* halo = &bloom_[static_cast<size_t>(blockY) * bloomWidth_ * 3];
         const float* bg   = &background_[static_cast<size_t>(y) * width_ * 3];
         const float* lit  = &firelight_[static_cast<size_t>(y) * width_];
@@ -365,7 +424,6 @@ void Renderer::composite(float glow) {
 
         for (int x = 0; x < width_; ++x, src += 3, bg += 3) {
             const float* glowRow = halo + blockX * 3;
-            float*       acc     = raw + blockX * 3;
             const float  warm    = lit[x] * glow;
 
             uint32_t argb = 0xFF000000u;
@@ -377,7 +435,6 @@ void Renderer::composite(float glow) {
                 argb |= static_cast<uint32_t>(
                             gammaLut_[static_cast<int>(mapped * (kGammaLutSize - 1))])
                         << (16 - 8 * c);
-                acc[c] += light;
                 src[c] = light * kTrailDecay;
             }
             dst[x] = argb;
@@ -593,6 +650,7 @@ void Renderer::drawHud(const FireSystem& fire, float fps) {
 void Renderer::drawFrame(const FireSystem& fire, float fps) {
     accumulateStars(fire.elapsed());
     accumulateParticles(fire);
+    buildBloomRaw();
 
     void* locked = nullptr;
     int   bytePitch = 0;

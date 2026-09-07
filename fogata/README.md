@@ -114,7 +114,12 @@ El Makefile soporta dos modos de compilacion:
   durante la compilacion (sin `-fopenmp`). El codigo se ejecuta en un unico hilo.
   
 - **Paralelo**: Se habilita `-fopenmp` en la compilacion, y los pragmas se reconocen.
-  El codigo se ejecuta en multiples hilos usando OpenMP.
+  El programa desactiva la reduccion dinamica y configura al menos 8 hilos para
+  aprovechar los 8 nucleos del Apple M2. Si el equipo tiene mas procesadores
+  disponibles, utiliza ese numero mayor. Al iniciar muestra la cantidad configurada.
+
+La variable de entorno `OMP_NUM_THREADS` no puede reducir este minimo durante la
+ejecucion del programa paralelo.
 
 Ambas versiones se compilan en directorios separados:
 - `build-sequential/` para la version secuencial

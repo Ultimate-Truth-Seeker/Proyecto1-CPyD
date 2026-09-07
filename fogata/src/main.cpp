@@ -1,5 +1,6 @@
 #include <SDL2/SDL.h>
 
+#include <chrono>
 #include <cstdio>
 #include <exception>
 #include <new>
@@ -36,6 +37,15 @@ void runScreensaver(Renderer& renderer, FireSystem& fire) {
     double secondsSinceLog = 0.0;
     float  displayedFps    = 0.0f;
 
+    // Acumuladores para instrumentar findCriticalSpark() por separado del
+    // FPS general (ver Anexo 3): el costo de esta busqueda es una fraccion
+    // pequena del frame, asi que mezclarla con el tiempo de frame completo
+    // esconderia el efecto que se quiere medir. Se reporta en la misma
+    // ventana de 1 segundo que el log de FPS, pero en su propia linea.
+    long long sparkSamples          = 0;
+    double    sparkMicrosAccum      = 0.0;
+    long long sparkIterationsAccum  = 0;
+
     while (handleEvents()) {
         const Uint64 currentTicks = SDL_GetPerformanceCounter();
         const double elapsed =
@@ -47,6 +57,21 @@ void runScreensaver(Renderer& renderer, FireSystem& fire) {
         if (deltaTime > kMaxDeltaTime) deltaTime = kMaxDeltaTime;
 
         fire.update(deltaTime);
+
+        // Busqueda de la chispa critica, cronometrada de forma aislada.
+        // std::chrono::steady_clock no se ve afectado por ajustes del reloj
+        // del sistema, a diferencia de system_clock, lo que importa para
+        // mediciones de duracion cortas y repetidas como esta.
+        const auto sparkStart = std::chrono::steady_clock::now();
+        int sparkIterations = 0;
+        const int sparkIndex = fire.findCriticalSpark(sparkIterations);
+        const auto sparkEnd = std::chrono::steady_clock::now();
+        (void)sparkIndex;  // Semana futura: disparar el destello visual aqui.
+
+        sparkMicrosAccum += std::chrono::duration<double, std::micro>(sparkEnd - sparkStart).count();
+        sparkIterationsAccum += sparkIterations;
+        ++sparkSamples;
+
         renderer.drawFrame(fire, displayedFps);
 
         ++framesInWindow;
@@ -60,8 +85,16 @@ void runScreensaver(Renderer& renderer, FireSystem& fire) {
         }
         if (secondsSinceLog >= 1.0) {
             std::printf("FPS: %.1f\n", static_cast<double>(displayedFps));
+            if (sparkSamples > 0) {
+                std::printf("  findCriticalSpark: %.2f us/frame promedio, %.0f iteraciones/frame promedio\n",
+                            sparkMicrosAccum / static_cast<double>(sparkSamples),
+                            static_cast<double>(sparkIterationsAccum) / static_cast<double>(sparkSamples));
+            }
             std::fflush(stdout);
             secondsSinceLog = 0.0;
+            sparkSamples = 0;
+            sparkMicrosAccum = 0.0;
+            sparkIterationsAccum = 0;
         }
     }
 }
