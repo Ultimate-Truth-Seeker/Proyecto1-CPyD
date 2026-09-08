@@ -66,13 +66,15 @@ void runScreensaver(Renderer& renderer, FireSystem& fire) {
         int sparkIterations = 0;
         const int sparkIndex = fire.findCriticalSpark(sparkIterations);
         const auto sparkEnd = std::chrono::steady_clock::now();
-        (void)sparkIndex;  // Semana futura: disparar el destello visual aqui.
 
         sparkMicrosAccum += std::chrono::duration<double, std::micro>(sparkEnd - sparkStart).count();
         sparkIterationsAccum += sparkIterations;
         ++sparkSamples;
 
-        renderer.drawFrame(fire, displayedFps);
+        // sparkIndex (-1 si nadie supero el umbral este frame) se pasa al
+        // renderer para dibujar el destello visual sobre esa particula
+        // especifica -- ver Renderer::drawSparkHighlight().
+        renderer.drawFrame(fire, displayedFps, sparkIndex);
 
         ++framesInWindow;
         secondsInWindow += elapsed;

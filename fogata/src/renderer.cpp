@@ -115,6 +115,39 @@ float vignetteAt(int x, int y, int width, int height) {
     return std::max(0.20f, 1.0f - kVignette * radial * radial);
 }
 
+// Cuanto tarda un ciclo completo alternando entre paleta de fuego (cuerpo
+// negro) y paleta arcoiris, en segundos. Sube y baja como una onda
+// triangular: kRainbowCycleSeconds/2 subiendo, kRainbowCycleSeconds/2
+// bajando -- asi la transicion es gradual en ambos sentidos, nunca un salto.
+constexpr float kRainbowCycleSeconds = 14.0f;
+
+// Cuantas vueltas completas de matiz (hue) da la paleta arcoiris durante el
+// tiempo en que paletteMix esta por encima de cero. Un valor mayor a 1 hace
+// que el arcoiris "viaje" a lo largo del espectro en vez de quedarse fijo
+// en un solo tono mientras dura la mezcla.
+constexpr float kRainbowHueCycles = 1.6f;
+
+// Conversion HSV -> RGB estandar, con h en [0,1) (no en grados), s y v en
+// [0,1]. Se usa para generar la paleta arcoiris de colorForTemperature():
+// recorrer h de 0 a 1 pasa por todo el espectro visible (rojo -> amarillo
+// -> verde -> cian -> azul -> magenta -> rojo).
+void hsvToRgb(float h, float s, float v, float* outR, float* outG, float* outB) {
+    const float hh = (h - std::floor(h)) * 6.0f;
+    const int   i  = static_cast<int>(hh);
+    const float f  = hh - static_cast<float>(i);
+    const float p  = v * (1.0f - s);
+    const float q  = v * (1.0f - s * f);
+    const float t  = v * (1.0f - s * (1.0f - f));
+    switch (i) {
+        case 0:  *outR = v; *outG = t; *outB = p; break;
+        case 1:  *outR = q; *outG = v; *outB = p; break;
+        case 2:  *outR = p; *outG = v; *outB = t; break;
+        case 3:  *outR = p; *outG = q; *outB = v; break;
+        case 4:  *outR = t; *outG = p; *outB = v; break;
+        default: *outR = v; *outG = p; *outB = q; break;
+    }
+}
+
 }  // namespace
 
 Renderer::~Renderer() {
@@ -179,6 +212,42 @@ bool Renderer::init(const Config& cfg, const FireSystem& fire, std::string& erro
     return true;
 }
 
+void Renderer::colorForTemperature(float temp, float time, float* outR, float* outG, float* outB) const {
+    const int index = std::min(255, std::max(0, static_cast<int>(temp * 255.0f)));
+    const float fireR = blackbody_[index][0];
+    const float fireG = blackbody_[index][1];
+    const float fireB = blackbody_[index][2];
+
+    if (paletteMix_ <= 0.0f) {
+        *outR = fireR; *outG = fireG; *outB = fireB;
+        return;
+    }
+
+    // El matiz del arcoiris avanza con el tiempo (para que "viaje" por el
+    // espectro) y tambien varia un poco con la temperatura de la particula
+    // (para que no todas las particulas del frame sean el mismo color solido
+    // -- conservan algo de variacion visual entre si, como en la paleta de
+    // fuego original).
+    const float hue = std::fmod(time / kRainbowCycleSeconds * kRainbowHueCycles +
+                                temp * 0.25f, 1.0f);
+    float rainbowR, rainbowG, rainbowB;
+    hsvToRgb(hue, 0.85f, 1.0f, &rainbowR, &rainbowG, &rainbowB);
+
+    // La intensidad (brillo) sigue viniendo de la temperatura real de la
+    // particula, igual que con la paleta de cuerpo negro -- solo el MATIZ
+    // cambia a arcoiris. Sin esto, particulas frias (casi extintas)
+    // brillarian igual de fuerte que las calientes, rompiendo la logica de
+    // enfriamiento visual que ya tenia la fogata.
+    const float brightness = fireR + fireG + fireB;
+    rainbowR *= brightness;
+    rainbowG *= brightness;
+    rainbowB *= brightness;
+
+    *outR = fireR + (rainbowR - fireR) * paletteMix_;
+    *outG = fireG + (rainbowG - fireG) * paletteMix_;
+    *outB = fireB + (rainbowB - fireB) * paletteMix_;
+}
+
 void Renderer::buildPalette() {
     for (int i = 0; i < 256; ++i) {
         const float t = static_cast<float>(i) / 255.0f;
@@ -214,15 +283,40 @@ void Renderer::buildNightSky(Rng& rng) {
             0.0065f + 0.0050f * skyDepth,
             0.0210f + 0.0040f * skyDepth,
         };
-        const float fade = 1.0f - 0.45f * depth;
+
+        // El suelo ya no es un degradado casi plano: se oscurece un poco
+        // segun la profundidad (mas lejos del horizonte = ligeramente mas
+        // oscuro, simulando que la luz de la fogata/estrellas llega menos)
+        // y tiene motas de "tierra" mas marcadas que antes (kSoilGrainMin/Max
+        // en vez del rango casi imperceptible que tenia el fondo previo).
+        const float fade = 1.0f - 0.55f * depth;
 
         for (int x = 0; x < width_; ++x) {
-            const float dim   = vignetteAt(x, y, width_, height_);
-            const float grain = 0.75f + 0.50f * rng.nextFloat();
+            const float dim = vignetteAt(x, y, width_, height_);
+
+            if (onGround <= 0.0f) {
+                // Todavia en el cielo: sin textura de tierra.
+                float* out = &background_[(static_cast<size_t>(y) * width_ + x) * 3];
+                for (int c = 0; c < 3; ++c) out[c] = sky[c] * dim;
+                continue;
+            }
+
+            // Textura de tierra: dos octavas de "ruido" barato (grano fino +
+            // motas mas grandes) para que el suelo no se vea como un color
+            // solido ni como el degradado casi uniforme de antes.
+            const float fineGrain  = rng.nextFloat();
+            const float coarseGrain = 0.5f + 0.5f * std::sin(static_cast<float>(x) * 0.13f +
+                                                              static_cast<float>(y) * 0.09f +
+                                                              fineGrain * 6.2831853f);
+            const float grain = 0.55f + 0.30f * fineGrain + 0.15f * coarseGrain;
+
+            // Tono tierra/marron oscuro, mas saturado que el fondo anterior
+            // (que era casi negro puro) para que se lea claramente como piso
+            // y no como una simple sombra del cielo.
             const float soil[3] = {
-                0.0062f * grain * fade,
-                0.0044f * grain * fade,
-                0.0034f * grain * fade,
+                0.028f * grain * fade,
+                0.019f * grain * fade,
+                0.013f * grain * fade,
             };
             float* out = &background_[(static_cast<size_t>(y) * width_ + x) * 3];
             for (int c = 0; c < 3; ++c) {
@@ -289,6 +383,7 @@ void Renderer::accumulateParticles(const FireSystem& fire) {
     const float exposure  = intensity_ * density_;
     const float hearthY   = fire.hearthY();
     const float blueRange = 70.0f * fire.scale();
+    const float time      = fire.elapsed();
 
     for (std::vector<int>& tile : particleTiles_)
         tile.clear();
@@ -340,10 +435,11 @@ void Renderer::accumulateParticles(const FireSystem& fire) {
             const float emission = p.temp * p.temp * boost * exposure;
             if (emission <= 0.008f) continue;
 
-            const int index = std::min(255, static_cast<int>(p.temp * 255.0f));
-            colorR = blackbody_[index][0] * p.tintR * emission;
-            colorG = blackbody_[index][1] * p.tintG * emission;
-            colorB = blackbody_[index][2] * p.tintB * emission;
+            float baseR, baseG, baseB;
+            colorForTemperature(p.temp, time, &baseR, &baseG, &baseB);
+            colorR = baseR * p.tintR * emission;
+            colorG = baseG * p.tintG * emission;
+            colorB = baseB * p.tintB * emission;
 
             if (p.kind == ParticleKind::Flame) {
                 const float blue = clamp01((p.temp - 0.88f) * 8.0f) *
@@ -601,6 +697,53 @@ void Renderer::drawLogs(const FireSystem& fire) {
     }
 }
 
+void Renderer::drawSparkHighlight(const FireSystem& fire, int sparkIndex) {
+    if (sparkIndex < 0 || sparkIndex >= static_cast<int>(fire.particles().size())) return;
+
+    const Particle& p = fire.particles()[sparkIndex];
+    const int cx = static_cast<int>(p.x);
+    const int cy = static_cast<int>(p.y);
+
+    // Radio del destello: mayor al radio normal de la particula para que se
+    // note claramente cual fue la "chispa critica" que encontro
+    // findCriticalSpark() -- no es solo un cambio de color, es un anillo
+    // de luz blanca que la distingue de las demas particulas del mismo tipo.
+    const float ringRadius = std::max(6.0f, p.radius * 2.4f);
+    const int x0 = std::max(0,           static_cast<int>(cx - ringRadius));
+    const int x1 = std::min(width_  - 1, static_cast<int>(cx + ringRadius));
+    const int y0 = std::max(0,           static_cast<int>(cy - ringRadius));
+    const int y1 = std::min(height_ - 1, static_cast<int>(cy + ringRadius));
+    if (x0 > x1 || y0 > y1) return;
+
+    for (int y = y0; y <= y1; ++y) {
+        const float dy = static_cast<float>(y) - p.y;
+        for (int x = x0; x <= x1; ++x) {
+            const float dx = static_cast<float>(x) - p.x;
+            const float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist > ringRadius) continue;
+
+            // Anillo brillante cerca del borde de ringRadius, no un disco
+            // solido -- deja ver la particula real en el centro y marca su
+            // posicion con un halo, similar a un "reticulo" de seleccion.
+            const float ringDist = std::fabs(dist - ringRadius * 0.72f);
+            const float ringWidth = ringRadius * 0.16f;
+            if (ringDist > ringWidth) continue;
+            const float alpha = 1.0f - (ringDist / ringWidth);
+
+            const size_t offset = static_cast<size_t>(y) * pitch_ + x;
+            const uint32_t back = pixels_[offset];
+            const int backR = static_cast<int>((back >> 16) & 0xFF);
+            const int backG = static_cast<int>((back >>  8) & 0xFF);
+            const int backB = static_cast<int>( back        & 0xFF);
+            const int mr = static_cast<int>(backR + (255 - backR) * alpha);
+            const int mg = static_cast<int>(backG + (255 - backG) * alpha);
+            const int mb = static_cast<int>(backB + (230 - backB) * alpha);
+            pixels_[offset] = 0xFF000000u | (static_cast<uint32_t>(mr) << 16) |
+                              (static_cast<uint32_t>(mg) << 8) | static_cast<uint32_t>(mb);
+        }
+    }
+}
+
 void Renderer::drawText(int x, int y, int pixelSize, const std::string& text,
                         uint8_t r, uint8_t g, uint8_t b) {
     const uint32_t color = 0xFF000000u | (static_cast<uint32_t>(r) << 16) |
@@ -647,7 +790,15 @@ void Renderer::drawHud(const FireSystem& fire, float fps) {
     drawText(margin, infoY + 9 * size, size, "ESC O Q PARA SALIR", 130, 95, 70);
 }
 
-void Renderer::drawFrame(const FireSystem& fire, float fps) {
+void Renderer::drawFrame(const FireSystem& fire, float fps, int sparkIndex) {
+    // La mezcla de paleta (fuego <-> arcoiris) sigue una onda triangular en
+    // el tiempo: sube de 0 a 1 durante la primera mitad del ciclo, baja de
+    // 1 a 0 en la segunda mitad. Esto hace que la fogata alterne entre su
+    // paleta normal y un arcoiris completo de forma gradual y continua, sin
+    // saltos de color de un frame a otro.
+    const float cyclePos = std::fmod(fire.elapsed(), kRainbowCycleSeconds) / kRainbowCycleSeconds;
+    paletteMix_ = 1.0f - std::fabs(cyclePos * 2.0f - 1.0f);
+
     accumulateStars(fire.elapsed());
     accumulateParticles(fire);
     buildBloomRaw();
@@ -661,6 +812,7 @@ void Renderer::drawFrame(const FireSystem& fire, float fps) {
         composite(fire.flicker() * intensity_);
         drawLogs(fire);
         drawStones(fire);
+        drawSparkHighlight(fire, sparkIndex);
         drawHud(fire, fps);
 
         SDL_UnlockTexture(texture_);

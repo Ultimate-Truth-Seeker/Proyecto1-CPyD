@@ -27,7 +27,12 @@ class Renderer {
     Renderer& operator=(const Renderer&) = delete;
 
     bool init(const Config& cfg, const FireSystem& fire, std::string& error);
-    void drawFrame(const FireSystem& fire, float fps);
+
+    // sparkIndex es el indice devuelto por FireSystem::findCriticalSpark(),
+    // o -1 si ninguna particula supero el umbral en este frame. Cuando es
+    // >= 0, esa particula especifica se dibuja con un color/destello
+    // distintivo (ver drawSparkHighlight()) ademas de su color normal.
+    void drawFrame(const FireSystem& fire, float fps, int sparkIndex = -1);
 
  private:
     void buildPalette();
@@ -40,9 +45,18 @@ class Renderer {
     void blurBloom();
     void drawStones(const FireSystem& fire);
     void drawLogs(const FireSystem& fire);
+    void drawGround(const FireSystem& fire);
+    void drawSparkHighlight(const FireSystem& fire, int sparkIndex);
     void drawHud(const FireSystem& fire, float fps);
     void drawText(int x, int y, int pixelSize, const std::string& text,
                   uint8_t r, uint8_t g, uint8_t b);
+
+    // Devuelve el color RGB (en [0,1]) para una temperatura dada, mezclando
+    // la paleta de cuerpo negro fija (blackbody_) con una paleta arcoiris
+    // que rota su matiz (hue) con el tiempo, segun paletteMix_. Con
+    // paletteMix_ = 0 el resultado es 100% cuerpo negro (el look original);
+    // con paletteMix_ = 1 es 100% arcoiris.
+    void colorForTemperature(float temp, float time, float* outR, float* outG, float* outB) const;
 
     SDL_Window*   window_   = nullptr;
     SDL_Renderer* renderer_ = nullptr;
@@ -72,6 +86,12 @@ class Renderer {
 
     float   blackbody_[256][3];
     uint8_t gammaLut_[1024];
+
+    // Cuanto de la paleta arcoiris se mezcla sobre la de cuerpo negro,
+    // en [0,1]. Se recalcula cada frame en drawFrame() como una onda
+    // triangular lenta, para que la fogata alterne entre su paleta de
+    // fuego normal y un arcoiris completo, en vez de saltar de golpe.
+    float paletteMix_ = 0.0f;
 };
 
 #endif  // FOGATA_RENDERER_H
