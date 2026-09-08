@@ -251,6 +251,8 @@ long long FireSystem::findCriticalSparkWorkload(int repetitions) const {
             }
         }
         global_ops.fetch_add(local_ops, std::memory_order_relaxed);
+
+        #pragma omp barrier
     }
 
     return global_ops.load(std::memory_order_relaxed);
