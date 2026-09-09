@@ -225,7 +225,7 @@ void FireSystem::update(float dt, int& outSparkIndex, int& outSparkIterations) {
     {
         // --- FASE 1: physics (equivalente al anterior parallel for) ---
         // Cada hilo procesa su franja estatica de particulas.
-        #pragma omp for schedule(static)
+        #pragma omp for schedule(static) nowait
         for (int i = 0; i < n; ++i) {
             Particle& p = particles_[i];
             const float turbX = std::sin(p.y * 0.021f + t * 1.90f + p.phase) *
@@ -264,9 +264,9 @@ void FireSystem::update(float dt, int& outSparkIndex, int& outSparkIterations) {
 
             temperatureSum += p.temp;
         }
-        // Barrera implicita al salir del #pragma omp for: todos los hilos
-        // terminaron el physics antes de empezar la busqueda. Las escrituras
-        // a particles_[].temp son visibles para todos.
+        // Todos los hilos deben terminar el physics antes de empezar la
+        // busqueda. Las escrituras a particles_[].temp son visibles para todos.
+        #pragma omp barrier
 
         // --- FASE 2: busqueda con early termination (chunks manuales) ---
         // Cada hilo mide su propio tiempo de trabajo; el maximo entre todos
