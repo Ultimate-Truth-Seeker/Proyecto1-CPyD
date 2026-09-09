@@ -1,6 +1,7 @@
 #ifndef FOGATA_PARTICLE_H
 #define FOGATA_PARTICLE_H
 
+#include <chrono>
 #include <cstdint>
 #include <vector>
 
@@ -41,7 +42,13 @@ class FireSystem {
  public:
     explicit FireSystem(const Config& cfg);
 
-    void update(float dt);
+    // dt: delta time del frame.
+    // outSparkIndex: indice del primer candidato critico encontrado este frame,
+    //   o -1 si ninguno supera el umbral. En el build paralelo se calcula
+    //   dentro de la misma region omp parallel que el physics, eliminando
+    //   el overhead de lanzar una segunda region por frame.
+    // outSparkIterations: particulas examinadas en la busqueda (para Anexo 3).
+    void update(float dt, int& outSparkIndex, int& outSparkIterations);
 
     const std::vector<Particle>& particles() const { return particles_; }
     float hearthX()         const { return hearthX_; }
@@ -56,26 +63,24 @@ class FireSystem {
     // Es una metrica agregada de memoria compartida: cada hilo acumula su
     // propia suma parcial y OpenMP las combina de forma segura al final de
     // la region paralela, sin necesidad de locks manuales.
-    float averageTemperature() const { return avgTemperature_; }
+    float averageTemperature()  const { return avgTemperature_; }
+    int   lastSparkIndex()      const { return lastSparkIndex_; }
+    int   lastSparkIterations() const { return lastSparkIterations_; }
+    // Microsegundos que tomo SOLO la fase de busqueda en el ultimo update().
+    // En el build paralelo se mide dentro de la region omp parallel (el timer
+    // arranca antes de la fase 2 y para al salir); en el build secuencial
+    // envuelve la llamada a findCriticalSpark().
+    double lastSparkMicros()    const { return lastSparkMicros_; }
 
-    // Busca la primera particula (en orden de indice) cuya temperatura
-    // supera kCriticalSparkTemp -- una "chispa critica" que dispara un
-    // destello visual en el render. Es una busqueda con corte temprano
-    // (early-exit), no un recorrido completo: la secuencial se detiene en
-    // cuanto encuentra el primer indice que cumple la condicion, y la
-    // paralela reparte el recorrido entre hilos y corta apenas cualquiera
-    // de ellos encuentra un candidato (ver particle.cpp para el mecanismo
-    // de senalizacion). Retorna el indice encontrado, o -1 si ninguna
-    // particula supera el umbral en este frame.
-    //
-    // outIterations recibe cuantas particulas se examinaron en total antes
-    // de detenerse (sumando todos los hilos en la version paralela). Existe
-    // solo para instrumentar el Anexo 3: permite reportar el ahorro de
-    // trabajo real, no solo el tiempo de reloj.
-    int findCriticalSpark(int& outIterations) const;
+    // findCriticalSpark() ya no se llama desde fuera: la busqueda ocurre
+    // dentro de update() en la misma region paralela que el physics.
+    // Se mantiene como metodo privado para poder usarse en el build
+    // secuencial (donde no hay fusion de regiones).
+    // Si necesitas invocarla directamente en tests, hazla publica de nuevo.
 
  private:
     void respawn(Particle& particle);
+    int  findCriticalSpark(int& outIterations) const;
 
     std::vector<Particle> particles_;
     Rng   rng_;
@@ -86,6 +91,11 @@ class FireSystem {
     float wind_;
     float elapsed_ = 0.0f;
     float avgTemperature_ = 0.0f;
+    // Resultados de la busqueda del ultimo update(), expuestos para el
+    // renderer y el log sin necesidad de una segunda llamada publica.
+    int    lastSparkIndex_      = -1;
+    int    lastSparkIterations_ = 0;
+    double lastSparkMicros_     = 0.0;
 };
 
 #endif  // FOGATA_PARTICLE_H

@@ -209,6 +209,7 @@ bool Renderer::init(const Config& cfg, const FireSystem& fire, std::string& erro
     buildPalette();
     buildNightSky(rng);
     buildFirelight(fire);
+    buildSparkSprite();
     return true;
 }
 
@@ -301,22 +302,29 @@ void Renderer::buildNightSky(Rng& rng) {
                 continue;
             }
 
-            // Textura de tierra: dos octavas de "ruido" barato (grano fino +
-            // motas mas grandes) para que el suelo no se vea como un color
-            // solido ni como el degradado casi uniforme de antes.
-            const float fineGrain  = rng.nextFloat();
-            const float coarseGrain = 0.5f + 0.5f * std::sin(static_cast<float>(x) * 0.13f +
-                                                              static_cast<float>(y) * 0.09f +
-                                                              fineGrain * 6.2831853f);
-            const float grain = 0.55f + 0.30f * fineGrain + 0.15f * coarseGrain;
+            // Textura de tierra: tres octavas de ruido barato.
+            // Grano fino aleatorio + ondas medias + ondas largas ("parcelas").
+            const float fineGrain   = rng.nextFloat();
+            const float medGrain    = 0.5f + 0.5f * std::sin(static_cast<float>(x) * 0.13f +
+                                                             static_cast<float>(y) * 0.09f +
+                                                             fineGrain * 6.2831853f);
+            const float coarseGrain = 0.5f + 0.5f * std::sin(static_cast<float>(x) * 0.031f +
+                                                             static_cast<float>(y) * 0.022f);
+            const float grain = 0.45f + 0.25f * fineGrain
+                                     + 0.18f * medGrain
+                                     + 0.12f * coarseGrain;
 
-            // Tono tierra/marron oscuro, mas saturado que el fondo anterior
-            // (que era casi negro puro) para que se lea claramente como piso
-            // y no como una simple sombra del cielo.
+            // Hierba esporadica: puntos verticales algo mas claros y verdosos
+            // cerca del horizonte (donde la distancia los hace sutiles).
+            const float grassProb = rng.nextFloat();
+            const float grassBlade = (grassProb < 0.055f && depth < 0.18f) ? 1.8f : 1.0f;
+            const float grassTint  = (grassProb < 0.055f && depth < 0.18f) ? 1.35f : 1.0f;
+
+            // Tono tierra/marron oscuro con veta verdosa cerca del horizonte.
             const float soil[3] = {
-                0.028f * grain * fade,
-                0.019f * grain * fade,
-                0.013f * grain * fade,
+                0.032f * grain * fade * grassBlade,
+                0.024f * grain * fade * grassBlade * grassTint,
+                0.014f * grain * fade * grassBlade,
             };
             float* out = &background_[(static_cast<size_t>(y) * width_ + x) * 3];
             for (int c = 0; c < 3; ++c) {
@@ -333,10 +341,35 @@ void Renderer::buildNightSky(Rng& rng) {
         const int y = static_cast<int>(rng.nextFloat() * static_cast<float>(starCeiling));
         if (x >= width_ || y >= height_) continue;
         const float far = 1.0f - static_cast<float>(y) / static_cast<float>(starCeiling);
-        stars_.push_back({y * width_ + x,
+        // Las estrellas mas cerca del horizonte (far~0) se mueven mas lento;
+        // las del cenit (far~1) se mueven mas rapido -- efecto paralaje.
+        const float speed = 0.35f + 0.65f * far;
+        stars_.push_back({x, y,
                           rng.range(0.10f, 0.85f) * (0.45f + 0.55f * far) *
                               vignetteAt(x, y, width_, height_),
-                          rng.range(0.0f, 6.2831853f)});
+                          rng.range(0.0f, 6.2831853f),
+                          speed});
+    }
+
+    // Generar arboles procedurales: siluetas de pino a distintas distancias
+    // (simuladas con escala) distribuidos a lo largo del horizonte,
+    // evitando el centro donde esta la fogata.
+    trees_.clear();
+    const int treeCount = 14;
+    trees_.reserve(treeCount);
+    for (int i = 0; i < treeCount; ++i) {
+        Tree t;
+        // Distribuir en dos grupos: izquierda y derecha de la fogata.
+        // Fraccion en [0,1] del ancho de pantalla.
+        if (i < treeCount / 2) {
+            t.x = rng.range(0.02f, 0.34f);
+        } else {
+            t.x = rng.range(0.66f, 0.98f);
+        }
+        t.scale  = rng.range(0.45f, 1.0f);   // escala: arboles mas pequeños = mas lejos
+        t.layers = 3 + static_cast<int>(rng.nextFloat() * 3.0f); // 3-5 capas
+        t.lean   = rng.range(-0.04f, 0.04f); // ligera inclinacion
+        trees_.push_back(t);
     }
 }
 
@@ -369,10 +402,25 @@ void Renderer::buildFirelight(const FireSystem& fire) {
 }
 
 void Renderer::accumulateStars(float time) {
+    // Velocidad angular de la boveda estelar en pixeles/segundo.
+    // Con kStarDriftSpeed = 4.0 y una pantalla de 1280px, una vuelta
+    // completa (width_ pixeles) tardaria ~320 segundos: imperceptible
+    // frame a frame pero apreciable en el transcurso de la sesion.
+    constexpr float kStarDriftSpeed = 4.0f;
+
     for (const Star& star : stars_) {
+        // Offset horizontal que avanza con el tiempo; se envuelve con modulo
+        // para que las estrellas que salen por la derecha reaparezcan por la
+        // izquierda sin salto visible.
+        const float drift = kStarDriftSpeed * star.speed * time;
+        const int px = (star.x + static_cast<int>(drift)) % width_;
+        const int px_wrapped = (px < 0) ? px + width_ : px;
+        const int py = star.y;
+        if (py < 0 || py >= height_ || px_wrapped < 0 || px_wrapped >= width_) continue;
+
         const float twinkle = star.brightness *
                               (0.55f + 0.45f * std::sin(time * 1.7f + star.phase));
-        float* out = &field_[static_cast<size_t>(star.pixel) * 3];
+        float* out = &field_[(static_cast<size_t>(py) * width_ + px_wrapped) * 3];
         out[0] += kStarColor[0] * twinkle;
         out[1] += kStarColor[1] * twinkle;
         out[2] += kStarColor[2] * twinkle;
@@ -589,6 +637,197 @@ void Renderer::blurBloom() {
     }
 }
 
+void Renderer::drawGround(const FireSystem& fire) {
+    // Banda de suelo iluminada cerca de la fogata: un gradiente horizontal
+    // color tierra-calida que se mezcla sobre el background ya compuesto.
+    // Solo afecta la franja visible del suelo (desde el horizonte hacia abajo)
+    // y se desvanece hacia los bordes de la pantalla.
+    const int   horizon  = static_cast<int>(static_cast<float>(height_) * kHorizonRatio);
+    const float centerX  = fire.hearthX();
+    const float halfW    = fire.hearthHalfWidth();
+    const float glow     = fire.flicker();
+    const float poolR    = halfW * 5.5f;  // radio del charco de luz en el suelo
+
+    for (int y = horizon; y < height_; ++y) {
+        // Cuanto mas lejos del horizonte mas tenue (suelo lejano esta en sombra).
+        const float depth = static_cast<float>(y - horizon) /
+                            static_cast<float>(std::max(1, height_ - horizon));
+        const float depthFade = 1.0f - 0.80f * depth;
+
+        for (int x = 0; x < width_; ++x) {
+            const float dx  = static_cast<float>(x) - centerX;
+            // La luz se aplana horizontalmente (perspectiva del suelo).
+            const float dist = std::fabs(dx) / poolR;
+            if (dist >= 1.0f) continue;
+
+            const float radial = (1.0f - dist * dist) * depthFade * glow * 0.28f;
+            if (radial <= 0.002f) continue;
+
+            const size_t offset = static_cast<size_t>(y) * pitch_ + x;
+            const uint32_t back = pixels_[offset];
+            const int backR = static_cast<int>((back >> 16) & 0xFF);
+            const int backG = static_cast<int>((back >>  8) & 0xFF);
+            const int backB = static_cast<int>( back        & 0xFF);
+
+            // Tono naranja-calido de la luz de la fogata sobre la tierra.
+            const int mr = std::min(255, backR + static_cast<int>(radial * 180.0f));
+            const int mg = std::min(255, backG + static_cast<int>(radial *  72.0f));
+            const int mb = std::min(255, backB + static_cast<int>(radial *  18.0f));
+            pixels_[offset] = 0xFF000000u | (static_cast<uint32_t>(mr) << 16) |
+                              (static_cast<uint32_t>(mg) << 8) | static_cast<uint32_t>(mb);
+        }
+    }
+}
+
+void Renderer::drawTrees(const FireSystem& fire) {
+    // Siluetas de pino dibujadas sobre pixels_ como geometria procedural.
+    // Cada arbol es una serie de triangulos apilados ("capas") que se
+    // estrechan hacia arriba, mas un tronco rectangular en la base.
+    // El color base es casi negro (silueta nocturna); el borde inferior de
+    // cada capa recibe un sutil tinte naranja de la luz de la fogata,
+    // proporcional a la distancia horizontal al centro.
+
+    const int   horizon  = static_cast<int>(static_cast<float>(height_) * kHorizonRatio);
+    const float centerX  = fire.hearthX();
+    const float halfW    = fire.hearthHalfWidth();
+    const float glow     = fire.flicker();
+    const float baseH    = static_cast<float>(height_);
+
+    // Altura y ancho maximos de un arbol de escala=1 (en pixeles relativos
+    // a la altura de pantalla).
+    constexpr float kTreeMaxHeight = 0.32f;  // fraccion de height_
+    constexpr float kTreeMaxWidth  = 0.055f; // fraccion de height_ (no width_)
+    constexpr float kTrunkFrac     = 0.12f;  // fraccion de la altura del arbol
+
+    for (const Tree& tree : trees_) {
+        const float treeH  = baseH * kTreeMaxHeight * tree.scale;
+        const float treeW  = baseH * kTreeMaxWidth  * tree.scale;
+        const float baseX  = tree.x * static_cast<float>(width_);
+        // La base del arbol esta en el horizonte; el tronco baja un poco mas.
+        const float baseY  = static_cast<float>(horizon);
+        const float topY   = baseY - treeH;
+        const float trunkH = treeH * kTrunkFrac;
+        const float trunkW = treeW * 0.12f;
+
+        // Distancia horizontal al fuego para la iluminacion ambiental.
+        const float distToFire = std::fabs(baseX - centerX);
+        // Cuanta luz de la fogata llega a este arbol (0 si muy lejos).
+        const float fireProximity = clamp01(1.0f - distToFire / (halfW * 9.0f));
+        const float edgeGlow = glow * fireProximity;
+
+        // --- Tronco ---
+        {
+            const int tx0 = std::max(0,          static_cast<int>(baseX - trunkW));
+            const int tx1 = std::min(width_ - 1, static_cast<int>(baseX + trunkW));
+            const int ty0 = std::max(0,          static_cast<int>(baseY - trunkH));
+            const int ty1 = std::min(height_ - 1,static_cast<int>(baseY + 4.0f));
+            for (int py = ty0; py <= ty1; ++py) {
+                for (int px = tx0; px <= tx1; ++px) {
+                    const size_t off = static_cast<size_t>(py) * pitch_ + px;
+                    // Tronco oscuro con tinte muy leve de fuego en la cara visible.
+                    const float edge = (static_cast<float>(px) - baseX) / trunkW; // [-1,1]
+                    const float lit  = edgeGlow * clamp01(1.0f - std::fabs(edge)) * 0.18f;
+                    const int r = std::min(255, 14 + static_cast<int>(lit * 140.0f));
+                    const int g = std::min(255,  9 + static_cast<int>(lit *  55.0f));
+                    const int b = std::min(255,  7 + static_cast<int>(lit *  14.0f));
+                    pixels_[off] = 0xFF000000u | (static_cast<uint32_t>(r) << 16) |
+                                   (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
+                }
+            }
+        }
+
+        // --- Capas del pino (de abajo hacia arriba) ---
+        const int   numLayers  = tree.layers;
+        const float layerStep  = (treeH - trunkH) / static_cast<float>(numLayers);
+
+        for (int layer = 0; layer < numLayers; ++layer) {
+            // Cada capa es un triangulo con base ancha abajo y punta arriba.
+            // Las capas de abajo son mas anchas; las de arriba mas estrechas.
+            const float layerFrac  = static_cast<float>(layer) / static_cast<float>(numLayers);
+            const float nextFrac   = static_cast<float>(layer + 1) / static_cast<float>(numLayers);
+            // La base de la capa esta un poco por encima del tronco.
+            const float layerBaseY = baseY - trunkH - layerStep * static_cast<float>(layer);
+            const float layerTopY  = layerBaseY - layerStep * 1.15f; // ligero solapado
+            const float layerBaseW = treeW * (1.0f - 0.25f * layerFrac);  // se estrecha
+            const float layerTopW  = treeW * (0.08f);                      // punta fina
+
+            const int py0 = std::max(0,          static_cast<int>(layerTopY));
+            const int py1 = std::min(height_ - 1,static_cast<int>(layerBaseY));
+
+            for (int py = py0; py <= py1; ++py) {
+                // Interpolacion lineal del ancho entre tope y base de esta capa.
+                const float t = (static_cast<float>(py) - layerTopY) /
+                                 std::max(1.0f, layerBaseY - layerTopY);
+                const float halfCap = layerTopW + (layerBaseW - layerTopW) * t;
+                // Inclinacion suave del arbol.
+                const float lean = tree.lean * static_cast<float>(height_) *
+                                   (1.0f - layerFrac - t * (1.0f - layerFrac) * 0.5f);
+                const int px0 = std::max(0,          static_cast<int>(baseX - halfCap + lean));
+                const int px1 = std::min(width_ - 1, static_cast<int>(baseX + halfCap + lean));
+
+                for (int px = px0; px <= px1; ++px) {
+                    // La base de cada capa (t cercano a 1) recibe mas luz de fogata;
+                    // la punta (t cercano a 0) casi no recibe.
+                    const float warmth = edgeGlow * t * clamp01(nextFrac) * 0.32f;
+                    // Borde lateral de la capa: algo mas iluminado para dar
+                    // volumen a las ramas (backlight muy sutil).
+                    const float nx = (static_cast<float>(px) - baseX) / std::max(1.0f, halfCap);
+                    const float sideLight = edgeGlow * (1.0f - std::fabs(nx)) * 0.08f * t;
+
+                    const int r = std::min(255,  8 + static_cast<int>((warmth + sideLight) * 220.0f));
+                    const int g = std::min(255, 14 + static_cast<int>((warmth * 0.42f + sideLight * 1.2f) * 220.0f));
+                    const int b = std::min(255,  8 + static_cast<int>((warmth * 0.10f + sideLight * 0.5f) * 220.0f));
+                    const size_t off = static_cast<size_t>(py) * pitch_ + px;
+                    pixels_[off] = 0xFF000000u | (static_cast<uint32_t>(r) << 16) |
+                                   (static_cast<uint32_t>(g) << 8) | static_cast<uint32_t>(b);
+                }
+            }
+        }
+
+        // --- Sombra proyectada en el suelo ---
+        // La sombra se dibuja como una elipse muy aplanada debajo del tronco.
+        // Direccion hacia el fuego: la sombra apunta al lado contrario.
+        {
+            const float shadowDir  = (baseX < centerX) ? -1.0f : 1.0f; // lado opuesto al fuego
+            const float shadowLen  = treeW * 2.8f * (0.4f + 0.6f * fireProximity);
+            const float shadowW    = trunkW * 1.8f;
+            const float shadowY0   = baseY;
+            const float shadowY1   = std::min(static_cast<float>(height_ - 1), baseY + shadowW);
+
+            const int sx0 = std::max(0,          static_cast<int>(baseX));
+            const int sx1 = std::min(width_ - 1, static_cast<int>(baseX + shadowDir * shadowLen));
+            const int lx0 = std::min(sx0, sx1);
+            const int lx1 = std::max(sx0, sx1);
+            const int sy0 = std::max(0,          static_cast<int>(shadowY0 - shadowW * 0.3f));
+            const int sy1 = std::min(height_ - 1,static_cast<int>(shadowY1));
+
+            for (int py = sy0; py <= sy1; ++py) {
+                // La sombra se desvanece hacia la punta.
+                const float tShadow = static_cast<float>(py - sy0) /
+                                      std::max(1.0f, static_cast<float>(sy1 - sy0));
+                for (int px = lx0; px <= lx1; ++px) {
+                    const float tLen = std::fabs(static_cast<float>(px) - baseX) /
+                                       std::max(1.0f, std::fabs(shadowDir * shadowLen));
+                    const float alpha = (1.0f - tLen) * (1.0f - tShadow) *
+                                        fireProximity * 0.55f;
+                    if (alpha <= 0.01f) continue;
+                    const size_t off = static_cast<size_t>(py) * pitch_ + px;
+                    const uint32_t back = pixels_[off];
+                    const int backR = static_cast<int>((back >> 16) & 0xFF);
+                    const int backG = static_cast<int>((back >>  8) & 0xFF);
+                    const int backB = static_cast<int>( back        & 0xFF);
+                    // La sombra oscurece el suelo.
+                    const int mr = static_cast<int>(backR * (1.0f - alpha * 0.7f));
+                    const int mg = static_cast<int>(backG * (1.0f - alpha * 0.7f));
+                    const int mb = static_cast<int>(backB * (1.0f - alpha * 0.7f));
+                    pixels_[off] = 0xFF000000u | (static_cast<uint32_t>(mr) << 16) |
+                                   (static_cast<uint32_t>(mg) << 8) | static_cast<uint32_t>(mb);
+                }
+            }
+        }
+    }
+}
+
 void Renderer::drawStones(const FireSystem& fire) {
     const float halfWidth = fire.hearthHalfWidth();
     const float centerX   = fire.hearthX();
@@ -697,49 +936,202 @@ void Renderer::drawLogs(const FireSystem& fire) {
     }
 }
 
+// -----------------------------------------------------------------------------
+// buildSparkSprite -- se llama UNA vez en init().
+//
+// Rellena sparkSprite_[64x64] con valores de alpha en [0,1] para un disco
+// de radio normalizado r en [0,1]:
+//
+//   r < 0.15          nucleo:  Gaussiana muy apretada (brillo central blanco)
+//   0.15 <= r < 0.70  halo:    decaimiento exponencial suave
+//   0.70 <= r < 0.85  anillo:  campana estrecha multiplicada por ruido angular
+//                              (sumas de sin/cos de frecuencias 5,7,11,13)
+//                              que da el borde "irregular" y organico
+//   0.85 <= r <= 1.0  fade:    caida cuadratica a cero -- transparencia total
+//
+// El sprite se estampa en drawSparkHighlight() escalando el radio al tamaño
+// real de la particula + offset de pulso, sin recalcular la tabla.
+// -----------------------------------------------------------------------------
+void Renderer::buildSparkSprite() {
+    constexpr int   S    = kSparkSpriteSize;         // 64
+    constexpr float half = static_cast<float>(S) * 0.5f;
+
+    // Amplitudes de las frecuencias angulares del ruido del anillo.
+    // Frecuencias impares no armonicas dan aspecto organico sin simetria obvia.
+    constexpr float kNoiseAmp[4]  = { 0.055f, 0.040f, 0.028f, 0.018f };
+    constexpr float kNoiseFreq[4] = { 5.0f,   7.0f,  11.0f,  13.0f  };
+    constexpr float kNoisePhase[4]= { 0.0f,   1.1f,   2.3f,   0.7f  };
+
+    for (int sy = 0; sy < S; ++sy) {
+        for (int sx = 0; sx < S; ++sx) {
+            const float fx = static_cast<float>(sx) - half + 0.5f;
+            const float fy = static_cast<float>(sy) - half + 0.5f;
+            const float r  = std::sqrt(fx * fx + fy * fy) / half; // [0, ~1.41]
+            const float angle = std::atan2(fy, fx);               // [-pi, pi]
+
+            float alpha = 0.0f;
+
+            if (r < 0.15f) {
+                // Nucleo: Gaussiana con sigma=0.07 (muy apretada)
+                const float t = r / 0.15f;               // [0,1]
+                alpha = std::exp(-t * t * 5.0f);          // 1 en centro, ~0 en borde
+
+            } else if (r < 0.70f) {
+                // Halo: decaimiento exponencial continuo desde el nucleo.
+                // La curva empalma con el nucleo en r=0.15 (alpha~0.53)
+                // y cae a ~0.04 en r=0.70 para fusionarse suavemente
+                // con el anillo.
+                const float t = (r - 0.15f) / (0.70f - 0.15f); // [0,1]
+                alpha = 0.53f * std::exp(-t * t * 3.8f);
+
+            } else if (r < 0.85f) {
+                // Anillo irregular: campana estrecha centrada en r=0.775
+                // modulada angularmente por ruido de baja frecuencia.
+                const float center = 0.775f;
+                const float width  = 0.065f;
+                const float t = (r - center) / width;         // [-inf, inf]
+                const float bell = std::exp(-t * t * 2.5f);   // pico en r=center
+
+                // Modulacion angular: suma de senos de frecuencias no armonicas.
+                // Da al anillo un aspecto de "llama" o "corona" irregular.
+                float noiseScale = 1.0f;
+                for (int k = 0; k < 4; ++k) {
+                    noiseScale += kNoiseAmp[k] *
+                        std::sin(kNoiseFreq[k] * angle + kNoisePhase[k]);
+                }
+                alpha = bell * noiseScale * 0.92f;
+
+            } else if (r <= 1.0f) {
+                // Fade cuadratico: de 0 en r=0.85 a 0 en r=1.0
+                // (en realidad hay un pixel de transicion minimo).
+                const float t = (r - 0.85f) / (1.0f - 0.85f);
+                alpha = (1.0f - t) * (1.0f - t) * 0.06f;
+            }
+            // r > 1.0 queda alpha=0 (esquinas del cuadrado 64x64)
+
+            sparkSprite_[static_cast<size_t>(sy) * S + sx] = clamp01(alpha);
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// drawSparkHighlight -- se llama cada frame.
+//
+// Estampa el sprite precalculado centrado en la particula critica.
+// El radio del sprite pulsa lentamente con una onda seno de ~1.1 Hz;
+// la intensidad del anillo tambien pulsa (en contrafase suave) para dar
+// vida sin que el nucleo parpadee.
+//
+// Color del sprite:
+//   nucleo (alpha alto, r<0.15)  -> blanco puro / azul palido
+//   halo   (0.15-0.70)          -> blanco calido que se desvanece
+//   anillo (0.70-0.85)          -> blanco azulado brillante en el pico
+//
+// La mezcla con el fondo es alpha-compositing additive:
+//   out = back + sprite_color * alpha
+// (no sustituye el pixel -- suma luz encima, como hace el resto del renderer)
+// -----------------------------------------------------------------------------
 void Renderer::drawSparkHighlight(const FireSystem& fire, int sparkIndex) {
     if (sparkIndex < 0 || sparkIndex >= static_cast<int>(fire.particles().size())) return;
 
-    const Particle& p = fire.particles()[sparkIndex];
-    const int cx = static_cast<int>(p.x);
-    const int cy = static_cast<int>(p.y);
+    const Particle& p   = fire.particles()[sparkIndex];
+    const float     t   = fire.elapsed();
 
-    // Radio del destello: mayor al radio normal de la particula para que se
-    // note claramente cual fue la "chispa critica" que encontro
-    // findCriticalSpark() -- no es solo un cambio de color, es un anillo
-    // de luz blanca que la distingue de las demas particulas del mismo tipo.
-    const float ringRadius = std::max(6.0f, p.radius * 2.4f);
-    const int x0 = std::max(0,           static_cast<int>(cx - ringRadius));
-    const int x1 = std::min(width_  - 1, static_cast<int>(cx + ringRadius));
-    const int y0 = std::max(0,           static_cast<int>(cy - ringRadius));
-    const int y1 = std::min(height_ - 1, static_cast<int>(cy + ringRadius));
+    // Pulso lento: onda seno a ~1.1 Hz en [0,1].
+    // Se usa para modular el radio externo (+/-12%) y la intensidad del anillo.
+    const float pulse    = 0.5f + 0.5f * std::sin(t * 6.9115f);  // 6.9115 ~ 2*pi*1.1
+    const float pulseFast= 0.5f + 0.5f * std::sin(t * 9.4248f);  // ~1.5 Hz, para el nucleo
+
+    // Radio del sprite en pixels de pantalla.
+    // Base: al menos 22px o 5x el radio de la particula (para ser visible
+    // incluso con particulas pequenas). El pulso anade +/-12% al radio.
+    const float baseRadius = std::max(22.0f, p.radius * 5.0f);
+    const float spriteR    = baseRadius * (1.0f + 0.12f * (pulse - 0.5f) * 2.0f);
+
+    // Intensidades de cada capa, moduladas por el pulso.
+    // El nucleo brilla mas cuando el anillo esta en su minimo (contrafase)
+    // para que el efecto general tenga dinamismo sin saturarse todo.
+    const float coreIntensity = 0.70f + 0.30f * pulseFast;          // [0.70, 1.0]
+    const float haloIntensity = 0.30f + 0.15f * (1.0f - pulse);     // [0.30, 0.45]
+    const float ringIntensity = 0.55f + 0.45f * pulse;              // [0.55, 1.0]
+
+    // Bounding box del sprite en pantalla, con clipping.
+    const int cx = static_cast<int>(std::round(p.x));
+    const int cy = static_cast<int>(std::round(p.y));
+    const int halfS = static_cast<int>(std::ceil(spriteR)) + 1;
+    const int x0 = std::max(0,          cx - halfS);
+    const int x1 = std::min(width_  - 1, cx + halfS);
+    const int y0 = std::max(0,          cy - halfS);
+    const int y1 = std::min(height_ - 1, cy + halfS);
     if (x0 > x1 || y0 > y1) return;
 
+    constexpr int   S    = kSparkSpriteSize;
+    constexpr float half = static_cast<float>(S) * 0.5f;
+
     for (int y = y0; y <= y1; ++y) {
-        const float dy = static_cast<float>(y) - p.y;
+        const float fy = static_cast<float>(y - cy);
         for (int x = x0; x <= x1; ++x) {
-            const float dx = static_cast<float>(x) - p.x;
-            const float dist = std::sqrt(dx * dx + dy * dy);
-            if (dist > ringRadius) continue;
+            const float fx = static_cast<float>(x - cx);
 
-            // Anillo brillante cerca del borde de ringRadius, no un disco
-            // solido -- deja ver la particula real en el centro y marca su
-            // posicion con un halo, similar a un "reticulo" de seleccion.
-            const float ringDist = std::fabs(dist - ringRadius * 0.72f);
-            const float ringWidth = ringRadius * 0.16f;
-            if (ringDist > ringWidth) continue;
-            const float alpha = 1.0f - (ringDist / ringWidth);
+            // Coordenada normalizada en el sprite [0, S-1] via radio de pantalla.
+            // spriteR corresponde a half celdas del sprite.
+            const float snx = fx / spriteR * half + half;
+            const float sny = fy / spriteR * half + half;
 
-            const size_t offset = static_cast<size_t>(y) * pitch_ + x;
-            const uint32_t back = pixels_[offset];
+            // Bilineal -- 4 texels vecinos
+            const int sx0 = static_cast<int>(snx);
+            const int sy0 = static_cast<int>(sny);
+            const int sx1 = sx0 + 1;
+            const int sy1 = sy0 + 1;
+            if (sx0 < 0 || sy0 < 0 || sx1 >= S || sy1 >= S) continue;
+
+            const float u = snx - static_cast<float>(sx0);
+            const float v = sny - static_cast<float>(sy0);
+            const float a00 = sparkSprite_[static_cast<size_t>(sy0) * S + sx0];
+            const float a10 = sparkSprite_[static_cast<size_t>(sy0) * S + sx1];
+            const float a01 = sparkSprite_[static_cast<size_t>(sy1) * S + sx0];
+            const float a11 = sparkSprite_[static_cast<size_t>(sy1) * S + sx1];
+            const float rawAlpha = (a00 * (1.0f - u) + a10 * u) * (1.0f - v)
+                                 + (a01 * (1.0f - u) + a11 * u) * v;
+            if (rawAlpha < 0.004f) continue;
+
+            // Radio normalizado para saber en que capa estamos.
+            const float r = std::sqrt(fx * fx + fy * fy) / spriteR;
+
+            // Color y alpha final segun zona:
+            float cr, cg, cb, alpha;
+            if (r < 0.15f) {
+                // Nucleo: blanco azulado brillante
+                alpha = rawAlpha * coreIntensity;
+                cr = 1.00f; cg = 0.96f; cb = 1.00f;
+            } else if (r < 0.70f) {
+                // Halo: blanco calido que se desvanece hacia naranja muy suave
+                // en el borde exterior (se mezcla con el color de la llama).
+                alpha = rawAlpha * haloIntensity;
+                const float fade = (r - 0.15f) / 0.55f;   // [0,1] dentro del halo
+                cr = 1.00f;
+                cg = 1.00f - 0.08f * fade;
+                cb = 0.95f - 0.15f * fade;
+            } else {
+                // Anillo: blanco azulado intenso con el pulso
+                alpha = rawAlpha * ringIntensity;
+                cr = 0.90f; cg = 0.95f; cb = 1.00f;
+            }
+
+            // Compositing aditivo: suma luz sobre el pixel existente.
+            // Esto respeta el look HDR del renderer (no clampa hasta gamma).
+            const size_t   offset = static_cast<size_t>(y) * pitch_ + x;
+            const uint32_t back   = pixels_[offset];
             const int backR = static_cast<int>((back >> 16) & 0xFF);
             const int backG = static_cast<int>((back >>  8) & 0xFF);
             const int backB = static_cast<int>( back        & 0xFF);
-            const int mr = static_cast<int>(backR + (255 - backR) * alpha);
-            const int mg = static_cast<int>(backG + (255 - backG) * alpha);
-            const int mb = static_cast<int>(backB + (230 - backB) * alpha);
-            pixels_[offset] = 0xFF000000u | (static_cast<uint32_t>(mr) << 16) |
-                              (static_cast<uint32_t>(mg) << 8) | static_cast<uint32_t>(mb);
+
+            const int mr = std::min(255, backR + static_cast<int>(cr * alpha * 255.0f));
+            const int mg = std::min(255, backG + static_cast<int>(cg * alpha * 255.0f));
+            const int mb = std::min(255, backB + static_cast<int>(cb * alpha * 255.0f));
+            pixels_[offset] = 0xFF000000u | (static_cast<uint32_t>(mr) << 16)
+                                          | (static_cast<uint32_t>(mg) <<  8)
+                                          |  static_cast<uint32_t>(mb);
         }
     }
 }
@@ -810,6 +1202,8 @@ void Renderer::drawFrame(const FireSystem& fire, float fps, int sparkIndex) {
         pitch_  = bytePitch / static_cast<int>(sizeof(uint32_t));
 
         composite(fire.flicker() * intensity_);
+        drawGround(fire);
+        drawTrees(fire);
         drawLogs(fire);
         drawStones(fire);
         drawSparkHighlight(fire, sparkIndex);

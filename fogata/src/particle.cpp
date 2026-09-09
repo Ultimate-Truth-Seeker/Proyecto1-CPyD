@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -40,20 +41,16 @@ constexpr float kMaxSmokeRadius = 26.0f;
 // valor final).
 constexpr float kCriticalSparkTemp = 0.999f;
 
-// Tamano de chunk que cada hilo reserva por turno en findCriticalSpark(),
-// via el contador atomico nextChunkStart (fetch_add). No es un schedule de
-// OpenMP -- ver el comentario dentro de findCriticalSpark() para la
-// diferencia, que importa: un #pragma omp parallel for con schedule(dynamic,
-// N) reparte igual TODOS los chunks del rango [0, n) sin importar que un
-// hilo ya haya encontrado el candidato, porque el propio 'for' de OpenMP no
-// se entera de que hay una condicion de salida -- eso fue exactamente el bug
-// de la primera version de esta funcion (ver Anexo 3 / docs/decisiones.md).
-// Aqui en cambio cada hilo pide chunks en un bucle manual que el hilo mismo
-// controla, y dejar de pedir es lo que saca al hilo del trabajo de verdad.
-// Un chunk chico (64) significa que un hilo nunca se compromete a una franja
-// grande sin candidato: agota el chunk actual y, si 'found' ya esta activa,
-// nunca pide el siguiente.
-constexpr int kSparkChunkSize = 64;
+// Tamano de chunk que cada hilo reserva por turno en la Fase 2 de update().
+// El tradeoff: chunk grande → menos fetch_add atomicos sobre el cacheline
+// compartido (menos contension), pero un hilo podria inspeccionar indices
+// mas alla del winner antes de cortar. Con el candidato tipicamente en el
+// primer 2.5% del arreglo (~6250 de 250000), un chunk de 1024 implica solo
+// ~6 fetch_add totales entre los 8 hilos, frente a ~94 con chunk=64. El
+// riesgo de sobrepasar al winner es minimo: el inner loop corta en cuanto
+// i >= winner.load(), por lo que el trabajo extra dentro del chunk es <= 1024
+// elementos a lo sumo -- aceptable.
+constexpr int kSparkChunkSize = 1024;
 
 float windGust(float t) {
     return std::sin(t * 0.37f)
@@ -143,21 +140,20 @@ void FireSystem::respawn(Particle& particle) {
     }
 }
 
-void FireSystem::update(float dt) {
+void FireSystem::update(float dt, int& outSparkIndex, int& outSparkIterations) {
     elapsed_ += dt;
     const float t        = elapsed_;
     const float gust     = windGust(t) * wind_ * kWindStrength * scale_;
     const float turbAmp  = kTurbulence * scale_;
     const float ceilingY = -60.0f * scale_;
 
-    // Mecanismo de sincronizacion explicito (requisito de la rubrica):
-    // cada hilo mantiene su propia suma parcial de temperatura en
-    // 'temperatureSum' y OpenMP las combina de forma segura al cerrar la
-    // region paralela (reduction), sin que ningun hilo escriba directamente
-    // sobre una variable compartida ni se necesite un lock manual.
     float temperatureSum = 0.0f;
 
-    #pragma omp parallel for schedule(static) reduction(+:temperatureSum)
+#ifndef _OPENMP
+    // ----------------------------------------------------------------
+    // BUILD SECUENCIAL
+    // Physics: recorrido simple con reduccion manual de temperatura.
+    // ----------------------------------------------------------------
     for (int i = 0; i < static_cast<int>(particles_.size()); ++i) {
         Particle& p = particles_[i];
         const float turbX = std::sin(p.y * 0.021f + t * 1.90f + p.phase) *
@@ -200,6 +196,134 @@ void FireSystem::update(float dt) {
     avgTemperature_ = particles_.empty()
         ? 0.0f
         : temperatureSum / static_cast<float>(particles_.size());
+
+    // Busqueda secuencial con early termination, cronometrada de forma aislada.
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        outSparkIndex = findCriticalSpark(outSparkIterations);
+        const auto t1 = std::chrono::steady_clock::now();
+        lastSparkMicros_ = std::chrono::duration<double, std::micro>(t1 - t0).count();
+    }
+
+#else
+    // ----------------------------------------------------------------
+    // BUILD PARALELO
+    // Una sola region omp parallel por frame: los hilos hacen el physics
+    // (parallel for con reduction) y luego la busqueda (chunks manuales)
+    // sin volver a sincronizarse con el SO entre medias.
+    // Esto elimina el overhead de ~55 us de lanzar una segunda region
+    // paralela que dominaba el tiempo de findCriticalSpark() cuando se
+    // llamaba separadamente desde main.cpp.
+    // ----------------------------------------------------------------
+    std::atomic<int>       sparkWinner{std::numeric_limits<int>::max()};
+    std::atomic<int>       sparkNextChunk{0};
+    std::atomic<long long> sparkIterationsAtomic{0};
+    std::atomic<long long> sparkNanosAtomic{0};  // wall-time de fase 2 en ns
+    const int n = static_cast<int>(particles_.size());
+
+    #pragma omp parallel reduction(+:temperatureSum)
+    {
+        // --- FASE 1: physics (equivalente al anterior parallel for) ---
+        // Cada hilo procesa su franja estatica de particulas.
+        #pragma omp for schedule(static)
+        for (int i = 0; i < n; ++i) {
+            Particle& p = particles_[i];
+            const float turbX = std::sin(p.y * 0.021f + t * 1.90f + p.phase) *
+                                std::cos(p.x * 0.017f - t * 1.15f);
+            const float turbY = std::cos(p.x * 0.024f - t * 1.40f + p.phase) *
+                                std::sin(p.y * 0.013f + t * 0.85f);
+
+            const bool isSmoke = (p.kind == ParticleKind::Smoke);
+            const float drag = (p.kind == ParticleKind::Ember) ? kDragEmber
+                             : isSmoke                         ? kDragSmoke
+                                                               : kDragFlame;
+            const float lift = isSmoke ? 190.0f : kBuoyancy * (p.temp * std::sqrt(p.temp));
+
+            p.vx += (turbX * turbAmp * (isSmoke ? 0.55f : 0.35f + p.temp)
+                  + gust * (isSmoke ? 2.20f : 1.0f)
+                  + (hearthX_ - p.x) * kConfinement * (1.0f - p.temp) * (isSmoke ? 0.15f : 1.0f)
+                  - drag * p.vx) * dt;
+
+            p.vy += (-lift * scale_
+                  + turbY * turbAmp * 0.45f
+                  - drag * p.vy) * dt;
+
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+
+            p.temp -= p.coolRate * dt * p.temp * 2.0f;
+
+            if (isSmoke) {
+                p.radius = std::min(p.radius + 15.0f * scale_ * dt, kMaxSmokeRadius * scale_);
+            } else if (p.kind == ParticleKind::Flame) {
+                p.radius = std::min(p.radius + 4.0f * scale_ * dt, kMaxFlameRadius * scale_);
+            }
+
+            const float deadTemp = isSmoke ? 0.035f : kDeadTemp;
+            if (p.temp <= deadTemp || p.y < ceilingY) respawn(p);
+
+            temperatureSum += p.temp;
+        }
+        // Barrera implicita al salir del #pragma omp for: todos los hilos
+        // terminaron el physics antes de empezar la busqueda. Las escrituras
+        // a particles_[].temp son visibles para todos.
+
+        // --- FASE 2: busqueda con early termination (chunks manuales) ---
+        // Cada hilo mide su propio tiempo de trabajo; el maximo entre todos
+        // es el wall-time real de la fase (el hilo mas lento marca el fin).
+        // Se acumula con fetch_add del maximo via compare_exchange.
+        const auto phase2T0 = std::chrono::steady_clock::now();
+        long long localIterations = 0;
+
+        for (;;) {
+            const int start = sparkNextChunk.fetch_add(kSparkChunkSize,
+                                                       std::memory_order_relaxed);
+            if (start >= n) break;
+            if (start >= sparkWinner.load(std::memory_order_relaxed)) break;
+
+            const int end = std::min(start + kSparkChunkSize, n);
+            for (int i = start; i < end; ++i) {
+                // Corte dentro del chunk: si otro hilo publico un winner
+                // menor al indice actual, los restantes de este chunk no
+                // pueden mejorar el resultado.
+                if (i >= sparkWinner.load(std::memory_order_relaxed)) break;
+                ++localIterations;
+                if (particles_[static_cast<size_t>(i)].temp > kCriticalSparkTemp) {
+                    int prev = sparkWinner.load(std::memory_order_relaxed);
+                    while (i < prev &&
+                           !sparkWinner.compare_exchange_weak(prev, i,
+                               std::memory_order_relaxed)) {}
+                    break;
+                }
+            }
+        }
+
+        // Tiempo de este hilo en la fase 2. Publicamos el maximo (wall-time).
+        const auto phase2T1 = std::chrono::steady_clock::now();
+        const long long localNs = std::chrono::duration_cast<
+            std::chrono::nanoseconds>(phase2T1 - phase2T0).count();
+        long long prev = sparkNanosAtomic.load(std::memory_order_relaxed);
+        while (localNs > prev &&
+               !sparkNanosAtomic.compare_exchange_weak(prev, localNs,
+                   std::memory_order_relaxed)) {}
+
+        sparkIterationsAtomic.fetch_add(localIterations, std::memory_order_relaxed);
+    }  // fin omp parallel -- barrera implicita: todos los hilos terminaron
+
+    avgTemperature_ = particles_.empty()
+        ? 0.0f
+        : temperatureSum / static_cast<float>(particles_.size());
+
+    const int w = sparkWinner.load(std::memory_order_relaxed);
+    outSparkIndex      = (w == std::numeric_limits<int>::max()) ? -1 : w;
+    outSparkIterations = static_cast<int>(sparkIterationsAtomic.load(
+                             std::memory_order_relaxed));
+    lastSparkMicros_   = static_cast<double>(
+                             sparkNanosAtomic.load(std::memory_order_relaxed)) * 1e-3;
+#endif
+
+    lastSparkIndex_      = outSparkIndex;
+    lastSparkIterations_ = outSparkIterations;
 }
 
 int FireSystem::findCriticalSpark(int& outIterations) const {

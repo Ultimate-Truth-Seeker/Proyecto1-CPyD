@@ -56,18 +56,19 @@ void runScreensaver(Renderer& renderer, FireSystem& fire) {
         if (deltaTime < kMinDeltaTime) deltaTime = kMinDeltaTime;
         if (deltaTime > kMaxDeltaTime) deltaTime = kMaxDeltaTime;
 
-        fire.update(deltaTime);
-
-        // Busqueda de la chispa critica, cronometrada de forma aislada.
-        // std::chrono::steady_clock no se ve afectado por ajustes del reloj
-        // del sistema, a diferencia de system_clock, lo que importa para
-        // mediciones de duracion cortas y repetidas como esta.
-        const auto sparkStart = std::chrono::steady_clock::now();
+        // update() ejecuta el physics. En el build paralelo, los hilos
+        // permanecen activos hasta el final de update() y la busqueda se
+        // ejecuta dentro de esa misma region paralela (sin overhead extra
+        // de lanzamiento). outSparkIndex y outSparkIterations se rellenan
+        // al terminar update().
         int sparkIterations = 0;
-        const int sparkIndex = fire.findCriticalSpark(sparkIterations);
-        const auto sparkEnd = std::chrono::steady_clock::now();
+        int sparkIndex      = -1;
+        fire.update(deltaTime, sparkIndex, sparkIterations);
 
-        sparkMicrosAccum += std::chrono::duration<double, std::micro>(sparkEnd - sparkStart).count();
+        // Cronometramos la busqueda midiendo via lastSparkMicros(), que
+        // update() registra internamente con steady_clock para aislar solo
+        // la fase de busqueda del costo total del frame.
+        sparkMicrosAccum += fire.lastSparkMicros();
         sparkIterationsAccum += sparkIterations;
         ++sparkSamples;
 

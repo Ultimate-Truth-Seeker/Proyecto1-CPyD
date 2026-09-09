@@ -13,9 +13,18 @@ struct SDL_Renderer;
 struct SDL_Texture;
 
 struct Star {
-    int   pixel;
+    int   x;
+    int   y;
     float brightness;
     float phase;
+    float speed;   // fraccion de velocidad de paralaje relativa al fondo
+};
+
+struct Tree {
+    float x;       // posicion X base del tronco (fraccion de width)
+    float scale;   // escala relativa (simula profundidad)
+    int   layers;  // numero de capas del pino (3-5)
+    float lean;    // inclinacion lateral suave
 };
 
 class Renderer {
@@ -38,6 +47,7 @@ class Renderer {
     void buildPalette();
     void buildNightSky(Rng& rng);
     void buildFirelight(const FireSystem& fire);
+    void buildSparkSprite();
     void accumulateStars(float time);
     void accumulateParticles(const FireSystem& fire);
     void buildBloomRaw();
@@ -46,6 +56,7 @@ class Renderer {
     void drawStones(const FireSystem& fire);
     void drawLogs(const FireSystem& fire);
     void drawGround(const FireSystem& fire);
+    void drawTrees(const FireSystem& fire);
     void drawSparkHighlight(const FireSystem& fire, int sparkIndex);
     void drawHud(const FireSystem& fire, float fps);
     void drawText(int x, int y, int pixelSize, const std::string& text,
@@ -57,6 +68,13 @@ class Renderer {
     // paletteMix_ = 0 el resultado es 100% cuerpo negro (el look original);
     // con paletteMix_ = 1 es 100% arcoiris.
     void colorForTemperature(float temp, float time, float* outR, float* outG, float* outB) const;
+
+    // Sprite radial precalculado para el highlight de la chispa critica.
+    // Contiene alpha en [0,1] para un radio normalizado; se estampa cada
+    // frame escalando al radio real de la particula + pulso de tiempo.
+    // Dimension fija; se recalcula en buildSparkSprite().
+    static constexpr int kSparkSpriteSize = 64;
+    float sparkSprite_[kSparkSpriteSize * kSparkSpriteSize] = {};
 
     SDL_Window*   window_   = nullptr;
     SDL_Renderer* renderer_ = nullptr;
@@ -74,6 +92,7 @@ class Renderer {
     std::vector<float>    bloomRaw_;
     std::vector<float>    bloomScratch_;
     std::vector<Star>     stars_;
+    std::vector<Tree>     trees_;
     std::vector<std::vector<int>> particleTiles_;
 
     uint32_t* pixels_ = nullptr;
