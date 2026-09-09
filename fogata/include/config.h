@@ -20,6 +20,7 @@ struct Config {
     int      width       = 1280;
     int      height      = 720;
     int      nParticles  = 3000;
+    int      searchWorkload = 300;
     float    intensity   = 1.0f;
     float    wind        = 0.35f;
     uint32_t seed        = 0;

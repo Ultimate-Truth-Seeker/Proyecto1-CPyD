@@ -285,10 +285,11 @@ void Renderer::accumulateStars(float time) {
     }
 }
 
-void Renderer::accumulateParticles(const FireSystem& fire) {
+void Renderer::accumulateParticles(const FireSystem& fire, int selectedParticle) {
     const float exposure  = intensity_ * density_;
     const float hearthY   = fire.hearthY();
     const float blueRange = 70.0f * fire.scale();
+    const int paletteOffset = static_cast<int>(fire.elapsed() * 42.0f) & 255;
 
     for (std::vector<int>& tile : particleTiles_)
         tile.clear();
@@ -329,21 +330,22 @@ void Renderer::accumulateParticles(const FireSystem& fire) {
         for (int pi : particleTiles_[tileIndex]) {
         const Particle& p = particles[pi];
         float colorR, colorG, colorB;
+        const float emission = (p.kind == ParticleKind::Smoke)
+            ? (0.35f + p.temp) * kSmokeBoost * exposure
+            : p.temp * p.temp * ((p.kind == ParticleKind::Ember) ? kEmberBoost : kFlameBoost) * exposure;
 
         if (p.kind == ParticleKind::Smoke) {
-            const float emission = (0.35f + p.temp) * kSmokeBoost * exposure;
             colorR = kSmokeColor[0] * p.tintR * emission;
             colorG = kSmokeColor[1] * p.tintG * emission;
             colorB = kSmokeColor[2] * p.tintB * emission;
         } else {
-            const float boost = (p.kind == ParticleKind::Ember) ? kEmberBoost : kFlameBoost;
-            const float emission = p.temp * p.temp * boost * exposure;
             if (emission <= 0.008f) continue;
 
             const int index = std::min(255, static_cast<int>(p.temp * 255.0f));
-            colorR = blackbody_[index][0] * p.tintR * emission;
-            colorG = blackbody_[index][1] * p.tintG * emission;
-            colorB = blackbody_[index][2] * p.tintB * emission;
+            const int paletteIndex = (index + paletteOffset) & 255;
+            colorR = blackbody_[paletteIndex][0] * p.tintR * emission;
+            colorG = blackbody_[paletteIndex][1] * p.tintG * emission;
+            colorB = blackbody_[paletteIndex][2] * p.tintB * emission;
 
             if (p.kind == ParticleKind::Flame) {
                 const float blue = clamp01((p.temp - 0.88f) * 8.0f) *
@@ -354,6 +356,12 @@ void Renderer::accumulateParticles(const FireSystem& fire) {
                     colorB += (kBlueCore[2] * emission - colorB) * blue;
                 }
             }
+        }
+
+        if (pi == selectedParticle) {
+            colorR = 0.20f * emission;
+            colorG = 0.95f * emission;
+            colorB = 1.00f * emission;
         }
 
         const float stretch = std::min(kMaxStretch, 1.0f + std::fabs(p.vy) * 0.006f);
@@ -647,9 +655,9 @@ void Renderer::drawHud(const FireSystem& fire, float fps) {
     drawText(margin, infoY + 9 * size, size, "ESC O Q PARA SALIR", 130, 95, 70);
 }
 
-void Renderer::drawFrame(const FireSystem& fire, float fps) {
+void Renderer::drawFrame(const FireSystem& fire, float fps, int selectedParticle) {
     accumulateStars(fire.elapsed());
-    accumulateParticles(fire);
+    accumulateParticles(fire, selectedParticle);
     buildBloomRaw();
 
     void* locked = nullptr;

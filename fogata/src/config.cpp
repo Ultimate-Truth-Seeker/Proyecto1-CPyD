@@ -153,6 +153,14 @@ bool configParse(int argc, char** argv, Config& out, std::string& error) {
                 return false;
             }
             cfg.seed = static_cast<uint32_t>(asInt);
+        } else if (std::strcmp(arg, "-c") == 0) {
+            const char* value = nextValue();
+            if (!value) { error = missingValue("-c"); return false; }
+            if (!parseInt(value, asInt) || asInt < 0) {
+                error = std::string("'-c ") + value + "' no es valido.";
+                return false;
+            }
+            cfg.searchWorkload = static_cast<int>(asInt);
         } else {
             error = std::string("opcion desconocida: '") + arg + "'.";
             return false;

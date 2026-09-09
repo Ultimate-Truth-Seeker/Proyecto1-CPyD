@@ -27,14 +27,14 @@ class Renderer {
     Renderer& operator=(const Renderer&) = delete;
 
     bool init(const Config& cfg, const FireSystem& fire, std::string& error);
-    void drawFrame(const FireSystem& fire, float fps);
+    void drawFrame(const FireSystem& fire, float fps, int selectedParticle);
 
  private:
     void buildPalette();
     void buildNightSky(Rng& rng);
     void buildFirelight(const FireSystem& fire);
     void accumulateStars(float time);
-    void accumulateParticles(const FireSystem& fire);
+    void accumulateParticles(const FireSystem& fire, int selectedParticle);
     void buildBloomRaw();
     void composite(float glow);
     void blurBloom();

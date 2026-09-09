@@ -28,7 +28,7 @@ bool handleEvents() {
     return true;
 }
 
-void runScreensaver(Renderer& renderer, FireSystem& fire) {
+void runScreensaver(Renderer& renderer, FireSystem& fire, Config& config) {
     Uint64 previousTicks = SDL_GetPerformanceCounter();
     const double tickFrequency = static_cast<double>(SDL_GetPerformanceFrequency());
 
@@ -63,16 +63,17 @@ void runScreensaver(Renderer& renderer, FireSystem& fire) {
         // del sistema, a diferencia de system_clock, lo que importa para
         // mediciones de duracion cortas y repetidas como esta.
         const auto sparkStart = std::chrono::steady_clock::now();
-        int sparkIterations = 0;
-        const int sparkIndex = fire.findCriticalSpark(sparkIterations);
+        const long long sparkIterations =
+            fire.findCriticalSparkWorkload(config.searchWorkload);
         const auto sparkEnd = std::chrono::steady_clock::now();
-        (void)sparkIndex;  // Semana futura: disparar el destello visual aqui.
 
         sparkMicrosAccum += std::chrono::duration<double, std::micro>(sparkEnd - sparkStart).count();
         sparkIterationsAccum += sparkIterations;
         ++sparkSamples;
 
-        renderer.drawFrame(fire, displayedFps);
+        int selectedSearchIterations = 0;
+        const int selectedParticle = fire.findCriticalSpark(selectedSearchIterations);
+        renderer.drawFrame(fire, displayedFps, selectedParticle);
 
         ++framesInWindow;
         secondsInWindow += elapsed;
@@ -132,7 +133,7 @@ int main(int argc, char* argv[]) {
         try {
             FireSystem fire(config);
             if (renderer.init(config, fire, error)) {
-                runScreensaver(renderer, fire);
+                runScreensaver(renderer, fire, config);
             } else {
                 std::fprintf(stderr, "Error: %s\n", error.c_str());
                 exitCode = 1;
